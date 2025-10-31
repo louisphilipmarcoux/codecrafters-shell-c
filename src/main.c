@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>    // For strcmp, strncmp, strlen, strdup, strtok, strerror
-#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir(), STDOUT_FILENO, dup2, close
+#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir()
 #include <sys/wait.h>  // For waitpid()
 #include <sys/types.h> // For pid_t
 #include <errno.h>     // For errno (used with chdir)
@@ -51,6 +51,95 @@ int find_executable(const char *command, char *full_path, size_t full_path_size)
   return 0; // Not found
 }
 
+/**
+ * Parse command line and extract redirect file if present.
+ * Returns the index where redirection starts, or -1 if no redirection.
+ */
+int find_redirect(char **args, char **redirect_file)
+{
+  *redirect_file = NULL;
+
+  for (int i = 0; args[i] != NULL; i++)
+  {
+    // Check for > or 1>
+    if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
+    {
+      if (args[i + 1] == NULL)
+      {
+        fprintf(stderr, "Error: No file specified for redirection\n");
+        return -2; // Error case
+      }
+      *redirect_file = args[i + 1];
+      return i; // Return index of redirect operator
+    }
+  }
+
+  return -1; // No redirection found
+}
+
+/**
+ * Execute echo builtin with optional output redirection.
+ */
+void execute_echo(char **args, int redirect_idx, char *redirect_file)
+{
+  FILE *output = stdout;
+
+  // Handle redirection
+  if (redirect_file != NULL)
+  {
+    output = fopen(redirect_file, "w");
+    if (output == NULL)
+    {
+      perror("fopen");
+      return;
+    }
+  }
+
+  // Print arguments (up to redirect operator if present)
+  int end_idx = (redirect_idx >= 0) ? redirect_idx : MAX_ARGS;
+  for (int i = 1; args[i] != NULL && i < end_idx; i++)
+  {
+    if (i > 1)
+      fprintf(output, " ");
+    fprintf(output, "%s", args[i]);
+  }
+  fprintf(output, "\n");
+
+  if (output != stdout)
+    fclose(output);
+}
+
+/**
+ * Execute pwd builtin with optional output redirection.
+ */
+void execute_pwd(char *redirect_file)
+{
+  char cwd_buffer[MAX_PATH_LENGTH];
+  FILE *output = stdout;
+
+  if (redirect_file != NULL)
+  {
+    output = fopen(redirect_file, "w");
+    if (output == NULL)
+    {
+      perror("fopen");
+      return;
+    }
+  }
+
+  if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL)
+  {
+    fprintf(output, "%s\n", cwd_buffer);
+  }
+  else
+  {
+    perror("getcwd");
+  }
+
+  if (output != stdout)
+    fclose(output);
+}
+
 int main(int argc, char *argv[])
 {
   // Flush after every printf
@@ -75,7 +164,13 @@ int main(int argc, char *argv[])
       command[len - 1] = '\0';
     }
 
-    // --- Command parsing ---
+    // 4. Handle empty input
+    if (strlen(command) == 0)
+    {
+      continue;
+    }
+
+    // --- Parse command with quote handling ---
     char *args[MAX_ARGS];
     int arg_index = 0;
 
@@ -94,97 +189,50 @@ int main(int argc, char *argv[])
       {
         if (c == '\\')
         {
-          if (new_arg)
-          {
-            args[arg_index] = write_ptr;
-            new_arg = 0;
-          }
           read_ptr++;
           if (*read_ptr == '\0')
             break;
-          *write_ptr++ = *read_ptr++;
+          *write_ptr = *read_ptr;
+          write_ptr++;
+          read_ptr++;
+          new_arg = 0;
         }
         else if (c == ' ')
         {
           if (!new_arg)
           {
-            *write_ptr++ = '\0';
+            *write_ptr = '\0';
+            write_ptr++;
+
             arg_index++;
             if (arg_index >= MAX_ARGS - 1)
+            {
+              fprintf(stderr, "Error: Too many arguments\n");
               break;
+            }
+            args[arg_index] = write_ptr;
             new_arg = 1;
           }
           read_ptr++;
         }
         else if (c == '\'')
         {
-          if (new_arg)
-          {
-            args[arg_index] = write_ptr;
-            new_arg = 0;
-          }
           state = STATE_IN_QUOTE;
           read_ptr++;
+          new_arg = 0;
         }
         else if (c == '"')
         {
-          if (new_arg)
-          {
-            args[arg_index] = write_ptr;
-            new_arg = 0;
-          }
           state = STATE_IN_DQUOTE;
           read_ptr++;
-        }
-        // --- Redirection Parsing ---
-        else if (c == '1' && read_ptr[1] == '>')
-        {
-          if (!new_arg)
-          {
-            *write_ptr++ = '\0';
-            arg_index++;
-            if (arg_index >= MAX_ARGS - 1)
-              break;
-          }
-          args[arg_index] = write_ptr;
-          *write_ptr++ = '1';
-          *write_ptr++ = '>';
-          *write_ptr++ = '\0';
-          arg_index++;
-          if (arg_index >= MAX_ARGS - 1)
-            break;
-          new_arg = 1;
-          args[arg_index] = write_ptr; // ✅ fix: prepare next arg slot
-          read_ptr += 2;
-        }
-        else if (c == '>')
-        {
-          if (!new_arg)
-          {
-            *write_ptr++ = '\0';
-            arg_index++;
-            if (arg_index >= MAX_ARGS - 1)
-              break;
-          }
-          args[arg_index] = write_ptr;
-          *write_ptr++ = '>';
-          *write_ptr++ = '\0';
-          arg_index++;
-          if (arg_index >= MAX_ARGS - 1)
-            break;
-          new_arg = 1;
-          args[arg_index] = write_ptr; // ✅ fix: prepare next arg slot
-          read_ptr++;
+          new_arg = 0;
         }
         else
         {
-          if (new_arg)
-          {
-            args[arg_index] = write_ptr;
-            new_arg = 0;
-          }
-          *write_ptr++ = c;
+          *write_ptr = c;
+          write_ptr++;
           read_ptr++;
+          new_arg = 0;
         }
       }
       else if (state == STATE_IN_QUOTE)
@@ -196,7 +244,8 @@ int main(int argc, char *argv[])
         }
         else
         {
-          *write_ptr++ = c;
+          *write_ptr = c;
+          write_ptr++;
           read_ptr++;
         }
       }
@@ -207,11 +256,14 @@ int main(int argc, char *argv[])
           if (read_ptr[1] == '\\' || read_ptr[1] == '"')
           {
             read_ptr++;
-            *write_ptr++ = *read_ptr++;
+            *write_ptr = *read_ptr;
+            write_ptr++;
+            read_ptr++;
           }
           else
           {
-            *write_ptr++ = c;
+            *write_ptr = c;
+            write_ptr++;
             read_ptr++;
           }
         }
@@ -222,153 +274,191 @@ int main(int argc, char *argv[])
         }
         else
         {
-          *write_ptr++ = c;
+          *write_ptr = c;
+          write_ptr++;
           read_ptr++;
         }
       }
     }
 
-    if (state != STATE_DEFAULT)
+    if (state == STATE_IN_QUOTE)
     {
-      fprintf(stderr, "Error: Unclosed quote\n");
+      fprintf(stderr, "Error: Unclosed single quote\n");
+      continue;
+    }
+    if (state == STATE_IN_DQUOTE)
+    {
+      fprintf(stderr, "Error: Unclosed double quote\n");
       continue;
     }
 
     *write_ptr = '\0';
+
     if (!new_arg)
+    {
       arg_index++;
+    }
     args[arg_index] = NULL;
 
-    // --- Handle redirection ---
-    char *real_args[MAX_ARGS];
-    char *output_file = NULL;
-    int real_arg_count = 0;
-    int parse_error = 0;
-
-    for (int i = 0; args[i] != NULL; i++)
+    if (args[0] == NULL)
     {
-      if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
-      {
-        if (args[i + 1] != NULL)
-        {
-          output_file = args[i + 1];
-          i++;
-        }
-        else
-        {
-          fprintf(stderr, "shell: syntax error near unexpected token `newline'\n");
-          parse_error = 1;
-          break;
-        }
-      }
-      else
-      {
-        real_args[real_arg_count++] = args[i];
-      }
+      continue;
     }
-    real_args[real_arg_count] = NULL;
 
-    if (parse_error)
-      continue;
-    if (real_args[0] == NULL)
-      continue;
+    // --- Check for output redirection ---
+    char *redirect_file = NULL;
+    int redirect_idx = find_redirect(args, &redirect_file);
 
-    // --- Built-in commands (non-forked) ---
-    if (strcmp(real_args[0], "exit") == 0)
+    if (redirect_idx == -2)
+    {
+      continue; // Error in redirection syntax
+    }
+
+    // Null-terminate args at redirect operator
+    if (redirect_idx >= 0)
+    {
+      args[redirect_idx] = NULL;
+    }
+
+    // --- Builtin Command Handling ---
+
+    // 5. Check for 'exit 0'
+    if (strcmp(args[0], "exit") == 0)
     {
       return 0;
     }
 
-    if (strcmp(real_args[0], "cd") == 0)
+    // 6. Check for 'pwd'
+    if (strcmp(args[0], "pwd") == 0)
     {
-      char *path_to_change = real_args[1] ? real_args[1] : getenv("HOME");
-      if (path_to_change == NULL)
+      execute_pwd(redirect_file);
+      continue;
+    }
+
+    // 7. Check for 'echo'
+    if (strcmp(args[0], "echo") == 0)
+    {
+      execute_echo(args, redirect_idx, redirect_file);
+      continue;
+    }
+
+    // 8. Check for 'cd'
+    if (strcmp(args[0], "cd") == 0)
+    {
+      if (args[1] == NULL)
       {
-        fprintf(stderr, "cd: HOME not set\n");
+        fprintf(stderr, "cd: missing argument\n");
+        continue;
       }
-      else if (chdir(path_to_change) != 0)
+
+      char *path_to_change = NULL;
+
+      if (strcmp(args[1], "~") == 0)
       {
-        fprintf(stderr, "cd: %s: %s\n", real_args[1], strerror(errno));
+        path_to_change = getenv("HOME");
+        if (path_to_change == NULL)
+        {
+          fprintf(stderr, "cd: HOME not set\n");
+          continue;
+        }
+      }
+      else
+      {
+        path_to_change = args[1];
+      }
+
+      if (chdir(path_to_change) != 0)
+      {
+        fprintf(stderr, "cd: %s: %s\n", args[1], strerror(errno));
       }
       continue;
     }
 
-    // --- Fork and execute ---
-    pid_t pid = fork();
-
-    if (pid == -1)
+    // 9. Check for 'type'
+    if (strcmp(args[0], "type") == 0)
     {
-      perror("fork");
-    }
-    else if (pid == 0)
-    {
-      // --- Child process ---
-      if (output_file != NULL)
+      if (args[1] == NULL)
       {
-        int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd == -1)
-        {
-          perror("open");
-          exit(EXIT_FAILURE);
-        }
-        if (dup2(fd, STDOUT_FILENO) == -1)
-        {
-          perror("dup2");
-          exit(EXIT_FAILURE);
-        }
-        close(fd);
+        fprintf(stderr, "type: missing argument\n");
+        continue;
       }
 
-      if (strcmp(real_args[0], "pwd") == 0)
-      {
-        char cwd_buffer[MAX_PATH_LENGTH];
-        if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL)
-          printf("%s\n", cwd_buffer);
-        else
-          perror("getcwd");
-        exit(0);
-      }
+      char *arg = args[1];
 
-      if (strcmp(real_args[0], "type") == 0)
+      if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
+          strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
+          strcmp(arg, "cd") == 0)
       {
-        char *arg = real_args[1];
-        if (arg == NULL)
-          exit(0);
-
-        if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
-            strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
-            strcmp(arg, "cd") == 0)
-        {
-          printf("%s is a shell builtin\n", arg);
-        }
-        else
-        {
-          char full_path[MAX_PATH_LENGTH];
-          if (find_executable(arg, full_path, MAX_PATH_LENGTH))
-            printf("%s is %s\n", arg, full_path);
-          else
-            printf("%s: not found\n", arg);
-        }
-        exit(0);
-      }
-
-      char full_path[MAX_PATH_LENGTH];
-      if (find_executable(real_args[0], full_path, MAX_PATH_LENGTH))
-      {
-        execv(full_path, real_args);
-        perror("execv");
-        exit(EXIT_FAILURE);
+        printf("%s is a shell builtin\n", arg);
       }
       else
       {
-        fprintf(stderr, "%s: command not found\n", real_args[0]);
-        exit(127);
+        char full_path[MAX_PATH_LENGTH];
+        if (find_executable(arg, full_path, MAX_PATH_LENGTH))
+        {
+          printf("%s is %s\n", arg, full_path);
+        }
+        else
+        {
+          printf("%s: not found\n", arg);
+        }
+      }
+      continue;
+    }
+
+    // --- External Command Execution ---
+    char *cmd_name = args[0];
+    char full_path[MAX_PATH_LENGTH];
+
+    if (find_executable(cmd_name, full_path, MAX_PATH_LENGTH))
+    {
+      pid_t pid = fork();
+
+      if (pid == -1)
+      {
+        perror("fork");
+      }
+      else if (pid == 0)
+      {
+        // Child Process
+
+        // Handle output redirection
+        if (redirect_file != NULL)
+        {
+          int fd = open(redirect_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          if (fd == -1)
+          {
+            perror("open");
+            exit(EXIT_FAILURE);
+          }
+
+          // Redirect stdout to the file
+          if (dup2(fd, STDOUT_FILENO) == -1)
+          {
+            perror("dup2");
+            close(fd);
+            exit(EXIT_FAILURE);
+          }
+
+          close(fd);
+        }
+
+        if (execv(full_path, args) == -1)
+        {
+          perror("execv");
+          exit(EXIT_FAILURE);
+        }
+      }
+      else
+      {
+        // Parent Process
+        int status;
+        waitpid(pid, &status, 0);
       }
     }
     else
     {
-      int status;
-      waitpid(pid, &status, 0);
+      fprintf(stderr, "%s: command not found\n", cmd_name);
     }
   }
 
