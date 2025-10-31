@@ -160,7 +160,7 @@ int main(int argc, char *argv[])
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
-          args[arg_index] = write_ptr; // <<< ***FIX 1: Point to *next* arg***
+          args[arg_index] = write_ptr; // <<< ***Point to *next* arg***
           new_arg = 1;                 // Ready for next arg
           read_ptr++;                  // Consume ">"
         }
@@ -185,7 +185,7 @@ int main(int argc, char *argv[])
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
-          args[arg_index] = write_ptr; // <<< ***FIX 2: Point to *next* arg***
+          args[arg_index] = write_ptr; // <<< ***Point to *next* arg***
           new_arg = 1;                 // Ready for next arg
           read_ptr += 2;               // Consume "1>"
         }
@@ -194,7 +194,7 @@ int main(int argc, char *argv[])
           if (new_arg)
           {
             args[arg_index] = write_ptr;
-          } // <<< ***FIX 3: Point to new arg***
+          } // <<< ***FIX***
           *write_ptr = c;
           write_ptr++;
           read_ptr++;
@@ -259,7 +259,7 @@ int main(int argc, char *argv[])
     }
     args[arg_index] = NULL;
 
-    // --- (Post-Parsing logic is unchanged) ---
+    // --- (NEW) Post-Parsing: Separate args from redirection ---
     char *real_args[MAX_ARGS];
     char *output_file = NULL;
     int real_arg_count = 0;
@@ -269,7 +269,8 @@ int main(int argc, char *argv[])
     {
       if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
       {
-        if (args[i + 1] != NULL && strlen(args[i + 1]) > 0) // Check for NULL *and* empty string
+        // Fix: Check for empty string *as well*
+        if (args[i + 1] != NULL && strlen(args[i + 1]) > 0)
         {
           output_file = args[i + 1];
           i++; // Skip the filename, it's not a real arg
@@ -294,16 +295,20 @@ int main(int argc, char *argv[])
     if (real_args[0] == NULL)
       continue; // Empty command
 
-    // --- (Builtin handling is unchanged) ---
+    // --- (REFACTORED) Builtin Handling ---
+
+    // 5. Handle 'exit' (non-forked)
     if (strcmp(real_args[0], "exit") == 0)
     {
       if (real_args[1] && strcmp(real_args[1], "0") == 0)
       {
         return 0; // Exit
       }
+      // Handle other exit codes later if needed
       return 0;
     }
 
+    // 6. Handle 'cd' (non-forked)
     if (strcmp(real_args[0], "cd") == 0)
     {
       char *path_to_change = NULL;
@@ -331,7 +336,8 @@ int main(int argc, char *argv[])
       continue; // 'cd' is done, loop back
     }
 
-    // --- (Fork/Exec logic is unchanged) ---
+    // --- (NEW) Fork for *all* other commands (builtins & external) ---
+
     pid_t pid = fork();
 
     if (pid == -1)
@@ -345,6 +351,7 @@ int main(int argc, char *argv[])
       // 7. Handle Redirection
       if (output_file != NULL)
       {
+        // Open the file
         int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd == -1)
         {
@@ -352,12 +359,13 @@ int main(int argc, char *argv[])
           exit(EXIT_FAILURE);
         }
 
+        // Redirect stdout (FD 1) to the file
         if (dup2(fd, STDOUT_FILENO) == -1)
         {
           perror("dup2");
           exit(EXIT_FAILURE);
         }
-        close(fd);
+        close(fd); // We don't need the original fd anymore
       }
 
       // 8. Handle *forked* builtins
