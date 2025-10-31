@@ -10,6 +10,13 @@
 #define MAX_PATH_LENGTH 1024
 #define MAX_ARGS 64 // Max number of arguments for a command
 
+// Define parser states
+enum
+{
+  STATE_DEFAULT,
+  STATE_IN_QUOTE
+};
+
 /**
  * Helper function to find an executable in PATH.
  * Populates 'full_path' if found.
@@ -17,6 +24,7 @@
  */
 int find_executable(const char *command, char *full_path, size_t full_path_size)
 {
+  // ... (This function is unchanged) ...
   char *path_env = getenv("PATH");
   if (path_env == NULL)
     return 0;
@@ -75,11 +83,12 @@ int main(int argc, char *argv[])
     }
 
     // --- Builtin Command Handling ---
+    // (Builtin checks remain unchanged)
 
     // 5. Check for 'exit 0'
     if (strcmp(command, "exit 0") == 0)
     {
-      return 0; // Exit the shell
+      return 0;
     }
 
     // 6. Check for 'pwd'
@@ -94,55 +103,51 @@ int main(int argc, char *argv[])
       {
         perror("getcwd");
       }
-      continue; // Command handled
+      continue;
     }
 
-    // 7. Check for 'echo' command
+    // 7. Check for 'echo' (simple version)
     if (strncmp(command, "echo ", 5) == 0)
     {
+      // This will only catch simple echos.
+      // Quoted echos will fail this check and be passed
+      // to the external command parser, which is correct.
       printf("%s\n", command + 5);
       continue;
     }
 
-    // 8. UPDATED: Check for 'cd' command
+    // 8. Check for 'cd'
     if (strncmp(command, "cd ", 3) == 0)
     {
-      // Get the argument (e.g., "/usr" or "~")
       char *path_arg = command + 3;
       char *path_to_change = NULL;
 
-      // Check if the argument is exactly "~"
       if (strcmp(path_arg, "~") == 0)
       {
         path_to_change = getenv("HOME");
         if (path_to_change == NULL)
         {
           fprintf(stderr, "cd: HOME not set\n");
-          continue; // Skip chdir
+          continue;
         }
       }
       else
       {
-        // Otherwise, use the argument as given
         path_to_change = path_arg;
       }
 
-      // Attempt to change directory
       if (chdir(path_to_change) != 0)
       {
-        // On failure, print the *original* argument
         fprintf(stderr, "cd: %s: %s\n", path_arg, strerror(errno));
       }
-
       continue;
     }
 
-    // 9. Check for 'type' command
+    // 9. Check for 'type'
     if (strncmp(command, "type ", 5) == 0)
     {
       char *arg = command + 5;
 
-      // Check builtins
       if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
           strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
           strcmp(arg, "cd") == 0)
@@ -151,7 +156,6 @@ int main(int argc, char *argv[])
       }
       else
       {
-        // Check executable in PATH
         char full_path[MAX_PATH_LENGTH];
         if (find_executable(arg, full_path, MAX_PATH_LENGTH))
         {
@@ -162,44 +166,109 @@ int main(int argc, char *argv[])
           printf("%s: not found\n", arg);
         }
       }
-      continue; // Command handled
+      continue;
     }
 
-    // --- External Command Execution ---
-    // ... (rest of the code is unchanged) ...
+    // --- External Command Execution (NEW PARSER) ---
 
-    // 10. Parse the command and its arguments
+    // 10. Parse the command and its arguments (with quote handling)
     char *args[MAX_ARGS];
-    int i = 0;
-    // We need a mutable copy of the command for strtok
-    char command_copy[MAX_COMMAND_LENGTH];
-    strcpy(command_copy, command);
+    int arg_index = 0;
 
-    char *token = strtok(command_copy, " ");
+    char *read_ptr = command;  // Read from the original command string
+    char *write_ptr = command; // Write the parsed argument back into the same string
 
-    while (token != NULL)
+    int state = STATE_DEFAULT;
+    args[arg_index] = write_ptr; // The start of the first argument
+    int new_arg = 1;             // Flag to indicate if we're at the start of a new arg
+
+    while (*read_ptr != '\0')
     {
-      args[i++] = token;
-      if (i >= MAX_ARGS - 1)
-      {
-        break;
-      }
-      token = strtok(NULL, " ");
-    }
-    args[i] = NULL;
+      char c = *read_ptr;
 
+      if (state == STATE_DEFAULT)
+      {
+        if (c == ' ')
+        {
+          // Space delimiter
+          if (!new_arg)
+          {                    // Only end arg if we've written something to it
+            *write_ptr = '\0'; // Null-terminate the current argument
+            write_ptr++;
+
+            // Start next argument
+            arg_index++;
+            if (arg_index >= MAX_ARGS - 1)
+            {
+              fprintf(stderr, "Error: Too many arguments\n");
+              break;
+            }
+            args[arg_index] = write_ptr;
+            new_arg = 1;
+          }
+          read_ptr++; // Skip the space
+        }
+        else if (c == '\'')
+        {
+          // Start of quote
+          state = STATE_IN_QUOTE;
+          read_ptr++;  // Don't copy the quote
+          new_arg = 0; // We are now writing to an argument
+        }
+        else
+        {
+          // Regular character
+          *write_ptr = c;
+          write_ptr++;
+          read_ptr++;
+          new_arg = 0; // We are now writing to an argument
+        }
+      }
+      else if (state == STATE_IN_QUOTE)
+      {
+        if (c == '\'')
+        {
+          // End of quote
+          state = STATE_DEFAULT;
+          read_ptr++; // Don't copy the quote
+        }
+        else
+        {
+          // Literal character
+          *write_ptr = c;
+          write_ptr++;
+          read_ptr++;
+        }
+      }
+    } // end while
+
+    if (state != STATE_DEFAULT)
+    {
+      fprintf(stderr, "Error: Unclosed single quote\n");
+      continue;
+    }
+
+    *write_ptr = '\0'; // Null-terminate the last argument
+
+    // Set the next arg pointer to NULL for execv
+    if (!new_arg)
+    { // If we were in the middle of writing an arg
+      arg_index++;
+    }
+    args[arg_index] = NULL;
+
+    // 11. Check for empty command (e.g., just spaces or empty quotes)
     if (args[0] == NULL)
-    { // Handle case like " " (spaces only)
+    {
       continue;
     }
 
     char *cmd_name = args[0];
     char full_path[MAX_PATH_LENGTH];
 
-    // 11. Find the executable
+    // 12. Find and execute
     if (find_executable(cmd_name, full_path, MAX_PATH_LENGTH))
     {
-
       pid_t pid = fork();
 
       if (pid == -1)
@@ -224,7 +293,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-      // 12. If not found, print error
+      // 13. If not found, print error
       fprintf(stderr, "%s: command not found\n", cmd_name);
     }
   }
