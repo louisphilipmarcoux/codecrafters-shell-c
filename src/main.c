@@ -98,7 +98,7 @@ int main(int argc, char *argv[])
           if (new_arg)
           {
             args[arg_index] = write_ptr;
-          }           // FIX
+          } // FIX
           read_ptr++; // Consume backslash
           if (*read_ptr == '\0')
             break;
@@ -269,8 +269,7 @@ int main(int argc, char *argv[])
     {
       if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
       {
-        // Fix: Check for empty string *as well*
-        if (args[i + 1] != NULL && strlen(args[i + 1]) > 0)
+        if (args[i + 1] != NULL)
         {
           output_file = args[i + 1];
           i++; // Skip the filename, it's not a real arg
