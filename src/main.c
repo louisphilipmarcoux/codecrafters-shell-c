@@ -1,9 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>    // For strcmp, strncmp, strlen, strdup, strtok
-#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd()
+#include <string.h>    // For strcmp, strncmp, strlen, strdup, strtok, strerror
+#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir()
 #include <sys/wait.h>  // For waitpid()
 #include <sys/types.h> // For pid_t
+#include <errno.h>     // For errno (used with chdir)
 
 #define MAX_COMMAND_LENGTH 1024
 #define MAX_PATH_LENGTH 1024
@@ -30,10 +31,7 @@ int find_executable(const char *command, char *full_path, size_t full_path_size)
   char *dir = strtok(path_copy, ":");
   while (dir != NULL)
   {
-    // Construct the full path
     snprintf(full_path, full_path_size, "%s/%s", dir, command);
-
-    // Check if file exists and has execute permissions
     if (access(full_path, X_OK) == 0)
     {
       free(path_copy);
@@ -84,18 +82,16 @@ int main(int argc, char *argv[])
       return 0; // Exit the shell
     }
 
-    // 6. NEW: Check for 'pwd'
+    // 6. Check for 'pwd'
     if (strcmp(command, "pwd") == 0)
     {
       char cwd_buffer[MAX_PATH_LENGTH];
-      // getcwd() fills the buffer with the current working directory
       if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL)
       {
         printf("%s\n", cwd_buffer);
       }
       else
       {
-        // Print an error if getcwd fails
         perror("getcwd");
       }
       continue; // Command handled
@@ -108,15 +104,34 @@ int main(int argc, char *argv[])
       continue;
     }
 
-    // 8. Check for 'type' command
+    // 8. NEW: Check for 'cd' command
+    if (strncmp(command, "cd ", 3) == 0)
+    {
+      // Get the path argument after "cd "
+      char *path = command + 3;
+
+      // chdir() returns 0 on success, -1 on error
+      if (chdir(path) != 0)
+      {
+        // If it fails, print the error message in the specified format
+        // strerror(errno) gets the system error message (e.g., "No such file or directory")
+        fprintf(stderr, "cd: %s: %s\n", path, strerror(errno));
+      }
+
+      // Whether it succeeded or failed, the command is handled.
+      continue;
+    }
+
+    // 9. Check for 'type' command
     if (strncmp(command, "type ", 5) == 0)
     {
       char *arg = command + 5;
 
-      // Check builtins
+      // Check builtins (now including 'cd')
       if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
-          strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0)
-      {
+          strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
+          strcmp(arg, "cd") == 0)
+      { // Added 'cd'
         printf("%s is a shell builtin\n", arg);
       }
       else
@@ -138,7 +153,7 @@ int main(int argc, char *argv[])
     // --- External Command Execution ---
     // If it wasn't a builtin, try to execute it.
 
-    // 9. Parse the command and its arguments
+    // 10. Parse the command and its arguments
     char *args[MAX_ARGS];
     int i = 0;
     char *token = strtok(command, " ");
@@ -152,12 +167,12 @@ int main(int argc, char *argv[])
       }
       token = strtok(NULL, " ");
     }
-    args[i] = NULL; // The args array must be NULL-terminated
+    args[i] = NULL;
 
     char *cmd_name = args[0];
     char full_path[MAX_PATH_LENGTH];
 
-    // 10. Find the executable
+    // 11. Find the executable
     if (find_executable(cmd_name, full_path, MAX_PATH_LENGTH))
     {
 
@@ -185,7 +200,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-      // 11. If not found, print error
+      // 12. If not found, print error
       fprintf(stderr, "%s: command not found\n", cmd_name);
     }
   }
