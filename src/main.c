@@ -141,6 +141,7 @@ int main(int argc, char *argv[])
           read_ptr++;
           new_arg = 0;
         }
+        // *** START OF REDIRECTION PARSING ***
         else if (c == '1' && read_ptr[1] == '>')
         { // Case: `1>`
           if (!new_arg)
@@ -187,6 +188,7 @@ int main(int argc, char *argv[])
           new_arg = 1;                 // Ready for next arg
           read_ptr++;                  // Consume ">"
         }
+        // *** END OF REDIRECTION PARSING ***
         else
         {
           if (new_arg)
@@ -345,10 +347,12 @@ int main(int argc, char *argv[])
     {
       // --- This is the Child Process ---
 
+      // *** START OF REDIRECTION HANDLING ***
       // 7. Handle Redirection
       if (output_file != NULL)
       {
         // Open the file
+        // 0644 permissions = rw-r--r--
         int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd == -1)
         {
@@ -364,6 +368,7 @@ int main(int argc, char *argv[])
         }
         close(fd); // We don't need the original fd anymore
       }
+      // *** END OF REDIRECTION HANDLING ***
 
       // 8. Handle *forked* builtins
       if (strcmp(real_args[0], "pwd") == 0)
