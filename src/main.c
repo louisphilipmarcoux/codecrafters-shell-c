@@ -37,25 +37,43 @@ int main(int argc, char *argv[])
     }
 
     // 5. Check for 'echo' command
-    // We use strncmp to check if the command *starts with* "echo "
-    // The " " (space) is important! "echo" has 4 chars, "echo " has 5.
     if (strncmp(command, "echo ", 5) == 0)
     {
-      // If it matches, print the rest of the string
       // 'command + 5' is a pointer to the character *after* "echo "
       printf("%s\n", command + 5);
-
-      // We've handled the command, so loop back to the prompt
-      continue;
+      continue; // Command handled, loop back
     }
 
-    // 6. Handle empty input
+    // 6. NEW: Check for 'type' command
+    if (strncmp(command, "type ", 5) == 0)
+    {
+      // Get the argument *after* "type "
+      char *arg = command + 5;
+
+      // Check if the argument is one of the known builtins
+      if (strcmp(arg, "echo") == 0 ||
+          strcmp(arg, "exit") == 0 ||
+          strcmp(arg, "type") == 0)
+      {
+        printf("%s is a shell builtin\n", arg);
+      }
+      else
+      {
+        // If not a known builtin, print "not found"
+        printf("%s: not found\n", arg);
+      }
+
+      continue; // Command handled, loop back
+    }
+
+    // 7. Handle empty input
     if (strlen(command) == 0)
     {
       continue;
     }
 
-    // 7. Print the error message (if no other command matched)
+    // 8. Print the error message (if no other command matched)
+    // Note: This is for *executing* a command, not for 'type'
     fprintf(stderr, "%s: command not found\n", command);
   }
 
