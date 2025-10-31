@@ -144,9 +144,9 @@ int main(int argc, char *argv[])
     {
       char *arg = command + 5;
 
-      // 'echo' is REMOVED from the builtin list
-      if (strcmp(arg, "exit") == 0 || strcmp(arg, "type") == 0 ||
-          strcmp(arg, "pwd") == 0 || strcmp(arg, "cd") == 0)
+      if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
+          strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
+          strcmp(arg, "cd") == 0)
       {
         printf("%s is a shell builtin\n", arg);
       }
