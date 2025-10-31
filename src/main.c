@@ -104,21 +104,36 @@ int main(int argc, char *argv[])
       continue;
     }
 
-    // 8. NEW: Check for 'cd' command
+    // 8. UPDATED: Check for 'cd' command
     if (strncmp(command, "cd ", 3) == 0)
     {
-      // Get the path argument after "cd "
-      char *path = command + 3;
+      // Get the argument (e.g., "/usr" or "~")
+      char *path_arg = command + 3;
+      char *path_to_change = NULL;
 
-      // chdir() returns 0 on success, -1 on error
-      if (chdir(path) != 0)
+      // Check if the argument is exactly "~"
+      if (strcmp(path_arg, "~") == 0)
       {
-        // If it fails, print the error message in the specified format
-        // strerror(errno) gets the system error message (e.g., "No such file or directory")
-        fprintf(stderr, "cd: %s: %s\n", path, strerror(errno));
+        path_to_change = getenv("HOME");
+        if (path_to_change == NULL)
+        {
+          fprintf(stderr, "cd: HOME not set\n");
+          continue; // Skip chdir
+        }
+      }
+      else
+      {
+        // Otherwise, use the argument as given
+        path_to_change = path_arg;
       }
 
-      // Whether it succeeded or failed, the command is handled.
+      // Attempt to change directory
+      if (chdir(path_to_change) != 0)
+      {
+        // On failure, print the *original* argument
+        fprintf(stderr, "cd: %s: %s\n", path_arg, strerror(errno));
+      }
+
       continue;
     }
 
@@ -127,11 +142,11 @@ int main(int argc, char *argv[])
     {
       char *arg = command + 5;
 
-      // Check builtins (now including 'cd')
+      // Check builtins
       if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
           strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
           strcmp(arg, "cd") == 0)
-      { // Added 'cd'
+      {
         printf("%s is a shell builtin\n", arg);
       }
       else
@@ -151,12 +166,16 @@ int main(int argc, char *argv[])
     }
 
     // --- External Command Execution ---
-    // If it wasn't a builtin, try to execute it.
+    // ... (rest of the code is unchanged) ...
 
     // 10. Parse the command and its arguments
     char *args[MAX_ARGS];
     int i = 0;
-    char *token = strtok(command, " ");
+    // We need a mutable copy of the command for strtok
+    char command_copy[MAX_COMMAND_LENGTH];
+    strcpy(command_copy, command);
+
+    char *token = strtok(command_copy, " ");
 
     while (token != NULL)
     {
@@ -168,6 +187,11 @@ int main(int argc, char *argv[])
       token = strtok(NULL, " ");
     }
     args[i] = NULL;
+
+    if (args[0] == NULL)
+    { // Handle case like " " (spaces only)
+      continue;
+    }
 
     char *cmd_name = args[0];
     char full_path[MAX_PATH_LENGTH];
