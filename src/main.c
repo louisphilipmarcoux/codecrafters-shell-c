@@ -14,17 +14,16 @@
 enum
 {
   STATE_DEFAULT,
-  STATE_IN_QUOTE
+  STATE_IN_QUOTE, // Single quote
+  STATE_IN_DQUOTE // Double quote
 };
 
 /**
  * Helper function to find an executable in PATH.
- * Populates 'full_path' if found.
- * Returns 1 if found, 0 otherwise.
+ * ... (This function is unchanged) ...
  */
 int find_executable(const char *command, char *full_path, size_t full_path_size)
 {
-  // ... (This function is unchanged) ...
   char *path_env = getenv("PATH");
   if (path_env == NULL)
     return 0;
@@ -83,6 +82,7 @@ int main(int argc, char *argv[])
     }
 
     // --- Builtin Command Handling ---
+    // ... (Builtin handling is unchanged) ...
 
     // 5. Check for 'exit 0'
     if (strcmp(command, "exit 0") == 0)
@@ -105,9 +105,7 @@ int main(int argc, char *argv[])
       continue;
     }
 
-    // 7. 'echo' builtin REMOVED
-    // The 'echo' command will now be handled by the
-    // external command parser below.
+    // 7. 'echo' builtin is removed
 
     // 8. Check for 'cd'
     if (strncmp(command, "cd ", 3) == 0)
@@ -126,9 +124,6 @@ int main(int argc, char *argv[])
       }
       else
       {
-        // This argument parsing is still too simple and will fail
-        // on `cd 'path with spaces'`. We'll fix this later.
-        // For now, it handles simple paths and `~`.
         path_to_change = path_arg;
       }
 
@@ -165,7 +160,7 @@ int main(int argc, char *argv[])
       continue;
     }
 
-    // --- External Command Execution (NEW PARSER) ---
+    // --- External Command Execution (UPDATED PARSER) ---
 
     // 10. Parse the command and its arguments (with quote handling)
     char *args[MAX_ARGS];
@@ -206,8 +201,15 @@ int main(int argc, char *argv[])
         }
         else if (c == '\'')
         {
-          // Start of quote
+          // Start of single quote
           state = STATE_IN_QUOTE;
+          read_ptr++;  // Don't copy the quote
+          new_arg = 0; // We are now writing to an argument
+        }
+        else if (c == '"') // NEW: Check for double quote
+        {
+          // Start of double quote
+          state = STATE_IN_DQUOTE;
           read_ptr++;  // Don't copy the quote
           new_arg = 0; // We are now writing to an argument
         }
@@ -224,7 +226,23 @@ int main(int argc, char *argv[])
       {
         if (c == '\'')
         {
-          // End of quote
+          // End of single quote
+          state = STATE_DEFAULT;
+          read_ptr++; // Don't copy the quote
+        }
+        else
+        {
+          // Literal character
+          *write_ptr = c;
+          write_ptr++;
+          read_ptr++;
+        }
+      }
+      else if (state == STATE_IN_DQUOTE) // NEW: Handle double quote state
+      {
+        if (c == '"')
+        {
+          // End of double quote
           state = STATE_DEFAULT;
           read_ptr++; // Don't copy the quote
         }
@@ -238,9 +256,15 @@ int main(int argc, char *argv[])
       }
     } // end while
 
-    if (state != STATE_DEFAULT)
+    // NEW: Updated error handling for unclosed quotes
+    if (state == STATE_IN_QUOTE)
     {
       fprintf(stderr, "Error: Unclosed single quote\n");
+      continue;
+    }
+    if (state == STATE_IN_DQUOTE)
+    {
+      fprintf(stderr, "Error: Unclosed double quote\n");
       continue;
     }
 
@@ -259,6 +283,7 @@ int main(int argc, char *argv[])
       continue;
     }
 
+    // --- (Execution logic is unchanged) ---
     char *cmd_name = args[0];
     char full_path[MAX_PATH_LENGTH];
 
