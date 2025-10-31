@@ -141,7 +141,12 @@ int main(int argc, char *argv[])
           read_ptr++;
           new_arg = 0;
         }
-        // *** START OF REDIRECTION PARSING ***
+        //
+        // --- KEY AREA 1: PARSING REDIRECTION TOKENS ---
+        // This logic identifies `1>` and `>` as separate tokens
+        // and sets `new_arg = 1` to signal that the *next*
+        // item (the filename) is a new argument.
+        //
         else if (c == '1' && read_ptr[1] == '>')
         { // Case: `1>`
           if (!new_arg)
@@ -163,7 +168,7 @@ int main(int argc, char *argv[])
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
-          new_arg = 1;                 // Ready for next arg
+          new_arg = 1;                 // Ready for next arg (the filename)
           read_ptr += 2;               // Consume "1>"
         }
         else if (c == '>')
@@ -185,12 +190,18 @@ int main(int argc, char *argv[])
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
-          new_arg = 1;                 // Ready for next arg
+          new_arg = 1;                 // Ready for next arg (the filename)
           read_ptr++;                  // Consume ">"
         }
-        // *** END OF REDIRECTION PARSING ***
         else
         {
+          //
+          // --- THIS IS THE FIX ---
+          // Because `new_arg` was set to 1 by the `>` block,
+          // this `if` statement catches the first character
+          // of the filename and sets `args[arg_index]` to
+          // point to it. This prevents the "syntax error".
+          //
           if (new_arg)
           {
             args[arg_index] = write_ptr;
@@ -259,7 +270,11 @@ int main(int argc, char *argv[])
     }
     args[arg_index] = NULL;
 
-    // --- (NEW) Post-Parsing: Separate args from redirection ---
+    // --- KEY AREA 2: POST-PARSING FOR REDIRECTION ---
+    // This loop scans the parsed `args` array. It separates
+    // the command arguments (like `ls`, `-1`) from the
+    // redirection operator and filename.
+    //
     char *real_args[MAX_ARGS];
     char *output_file = NULL;
     int real_arg_count = 0;
@@ -269,13 +284,15 @@ int main(int argc, char *argv[])
     {
       if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
       {
-        if (args[i + 1] != NULL)
+        if (args[i + 1] != NULL) // Check for the filename
         {
           output_file = args[i + 1];
           i++; // Skip the filename, it's not a real arg
         }
         else
         {
+          // This is the error your log shows. It happens
+          // if `args[i+1]` is NULL.
           fprintf(stderr, "shell: syntax error near unexpected token `newline'\n");
           parse_error = 1;
           break;
@@ -347,12 +364,15 @@ int main(int argc, char *argv[])
     {
       // --- This is the Child Process ---
 
-      // *** START OF REDIRECTION HANDLING ***
-      // 7. Handle Redirection
+      // --- KEY AREA 3: PERFORMING REDIRECTION ---
+      // If an output file was specified, this code runs
+      // *before* `execv`. It opens the file and uses
+      // `dup2` to make STDOUT_FILENO (file descriptor 1)
+      // point to the opened file.
+      //
       if (output_file != NULL)
       {
         // Open the file
-        // 0644 permissions = rw-r--r--
         int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd == -1)
         {
@@ -368,7 +388,6 @@ int main(int argc, char *argv[])
         }
         close(fd); // We don't need the original fd anymore
       }
-      // *** END OF REDIRECTION HANDLING ***
 
       // 8. Handle *forked* builtins
       if (strcmp(real_args[0], "pwd") == 0)
@@ -417,6 +436,8 @@ int main(int argc, char *argv[])
       char full_path[MAX_PATH_LENGTH];
       if (find_executable(real_args[0], full_path, MAX_PATH_LENGTH))
       {
+        // `execv` now runs, and its output (stdout)
+        // automatically goes to the file opened above.
         if (execv(full_path, real_args) == -1)
         {
           perror("execv");
