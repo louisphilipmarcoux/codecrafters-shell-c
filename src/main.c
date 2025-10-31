@@ -141,29 +141,6 @@ int main(int argc, char *argv[])
           read_ptr++;
           new_arg = 0;
         }
-        else if (c == '>')
-        { // Case: `>`
-          if (!new_arg)
-          { // Terminate previous arg
-            *write_ptr = '\0';
-            write_ptr++;
-            arg_index++;
-            if (arg_index >= MAX_ARGS - 1)
-              break;
-          }
-          // Add ">" as its own argument
-          *write_ptr = '>';
-          write_ptr++;
-          *write_ptr = '\0';
-          write_ptr++;
-          args[arg_index] = write_ptr - 2; // Point to the ">"
-          arg_index++;
-          if (arg_index >= MAX_ARGS - 1)
-            break;
-          args[arg_index] = write_ptr; // <<< ***Point to *next* arg***
-          new_arg = 1;                 // Ready for next arg
-          read_ptr++;                  // Consume ">"
-        }
         else if (c == '1' && read_ptr[1] == '>')
         { // Case: `1>`
           if (!new_arg)
@@ -188,6 +165,29 @@ int main(int argc, char *argv[])
           args[arg_index] = write_ptr; // <<< ***Point to *next* arg***
           new_arg = 1;                 // Ready for next arg
           read_ptr += 2;               // Consume "1>"
+        }
+        else if (c == '>')
+        { // Case: `>`
+          if (!new_arg)
+          { // Terminate previous arg
+            *write_ptr = '\0';
+            write_ptr++;
+            arg_index++;
+            if (arg_index >= MAX_ARGS - 1)
+              break;
+          }
+          // Add ">" as its own argument
+          *write_ptr = '>';
+          write_ptr++;
+          *write_ptr = '\0';
+          write_ptr++;
+          args[arg_index] = write_ptr - 2; // Point to the ">"
+          arg_index++;
+          if (arg_index >= MAX_ARGS - 1)
+            break;
+          args[arg_index] = write_ptr; // <<< ***Point to *next* arg***
+          new_arg = 1;                 // Ready for next arg
+          read_ptr++;                  // Consume ">"
         }
         else
         {
