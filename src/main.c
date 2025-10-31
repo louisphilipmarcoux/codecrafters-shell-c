@@ -162,7 +162,6 @@ int main(int argc, char *argv[])
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
-          args[arg_index] = write_ptr; // <<< ***Point to *next* arg***
           new_arg = 1;                 // Ready for next arg
           read_ptr += 2;               // Consume "1>"
         }
@@ -185,7 +184,6 @@ int main(int argc, char *argv[])
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
-          args[arg_index] = write_ptr; // <<< ***Point to *next* arg***
           new_arg = 1;                 // Ready for next arg
           read_ptr++;                  // Consume ">"
         }
