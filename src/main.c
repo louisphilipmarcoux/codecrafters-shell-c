@@ -76,7 +76,7 @@ int main(int argc, char *argv[])
       command[len - 1] = '\0';
     }
 
-    // --- (NEW PARSER) Parse command *before* checking builtins ---
+    // --- (CORRECTED PARSER) ---
     char *args[MAX_ARGS];
     int arg_index = 0;
 
@@ -84,7 +84,7 @@ int main(int argc, char *argv[])
     char *write_ptr = command;
 
     int state = STATE_DEFAULT;
-    args[arg_index] = write_ptr;
+    args[arg_index] = write_ptr; // Set pointer for first arg *before* loop
     int new_arg = 1;
 
     while (*read_ptr != '\0')
@@ -95,12 +95,13 @@ int main(int argc, char *argv[])
       {
         if (c == '\\')
         {
+          if (new_arg)
+          {
+            args[arg_index] = write_ptr;
+          }           // FIX
           read_ptr++; // Consume backslash
           if (*read_ptr == '\0')
             break;
-          if (new_arg) { // Handle case like `\` as first char of arg
-            args[arg_index] = write_ptr;
-          }
           *write_ptr = *read_ptr;
           write_ptr++;
           read_ptr++;
@@ -113,31 +114,33 @@ int main(int argc, char *argv[])
             *write_ptr = '\0';
             write_ptr++;
             arg_index++;
-            if (arg_index >= MAX_ARGS - 1) break;
-            args[arg_index] = write_ptr;
+            if (arg_index >= MAX_ARGS - 1)
+              break;
+            args[arg_index] = write_ptr; // Set pointer for *next* arg
             new_arg = 1;
           }
           read_ptr++; // Skip space
         }
         else if (c == '\'')
         {
-          if (new_arg) {
+          if (new_arg)
+          {
             args[arg_index] = write_ptr;
-          }
+          } // FIX
           state = STATE_IN_QUOTE;
           read_ptr++;
           new_arg = 0;
         }
         else if (c == '"')
         {
-          if (new_arg) {
+          if (new_arg)
+          {
             args[arg_index] = write_ptr;
-          }
+          } // FIX
           state = STATE_IN_DQUOTE;
           read_ptr++;
           new_arg = 0;
         }
-        // --- NEW: Handle redirection operators as delimiters ---
         else if (c == '>')
         { // Case: `>`
           if (!new_arg)
@@ -145,7 +148,8 @@ int main(int argc, char *argv[])
             *write_ptr = '\0';
             write_ptr++;
             arg_index++;
-            if (arg_index >= MAX_ARGS - 1) break;
+            if (arg_index >= MAX_ARGS - 1)
+              break;
           }
           // Add ">" as its own argument
           *write_ptr = '>';
@@ -154,10 +158,11 @@ int main(int argc, char *argv[])
           write_ptr++;
           args[arg_index] = write_ptr - 2; // Point to the ">"
           arg_index++;
-          if (arg_index >= MAX_ARGS - 1) break;
-          args[arg_index] = write_ptr; // <<< ***FIX 1: ADD THIS LINE***
-          new_arg = 1; // Ready for next arg
-          read_ptr++;  // Consume ">"
+          if (arg_index >= MAX_ARGS - 1)
+            break;
+          args[arg_index] = write_ptr; // <<< ***FIX 1: Point to *next* arg***
+          new_arg = 1;                 // Ready for next arg
+          read_ptr++;                  // Consume ">"
         }
         else if (c == '1' && read_ptr[1] == '>')
         { // Case: `1>`
@@ -166,7 +171,8 @@ int main(int argc, char *argv[])
             *write_ptr = '\0';
             write_ptr++;
             arg_index++;
-            if (arg_index >= MAX_ARGS - 1) break;
+            if (arg_index >= MAX_ARGS - 1)
+              break;
           }
           // Add "1>" as its own argument
           *write_ptr = '1';
@@ -177,17 +183,18 @@ int main(int argc, char *argv[])
           write_ptr++;
           args[arg_index] = write_ptr - 3; // Point to the "1>"
           arg_index++;
-          if (arg_index >= MAX_ARGS - 1) break;
-          args[arg_index] = write_ptr; // <<< ***FIX 2: ADD THIS LINE***
-          new_arg = 1; // Ready for next arg
-          read_ptr += 2; // Consume "1>"
+          if (arg_index >= MAX_ARGS - 1)
+            break;
+          args[arg_index] = write_ptr; // <<< ***FIX 2: Point to *next* arg***
+          new_arg = 1;                 // Ready for next arg
+          read_ptr += 2;               // Consume "1>"
         }
-        // --- End of new logic ---
         else
         {
-          if (new_arg) { // <<< ***FIX 3: ADD THIS BLOCK***
+          if (new_arg)
+          {
             args[arg_index] = write_ptr;
-          }
+          } // <<< ***FIX 3: Point to new arg***
           *write_ptr = c;
           write_ptr++;
           read_ptr++;
@@ -252,7 +259,7 @@ int main(int argc, char *argv[])
     }
     args[arg_index] = NULL;
 
-    // --- (NEW) Post-Parsing: Separate args from redirection ---
+    // --- (Post-Parsing logic is unchanged) ---
     char *real_args[MAX_ARGS];
     char *output_file = NULL;
     int real_arg_count = 0;
@@ -262,7 +269,7 @@ int main(int argc, char *argv[])
     {
       if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
       {
-        if (args[i + 1] != NULL)
+        if (args[i + 1] != NULL && strlen(args[i + 1]) > 0) // Check for NULL *and* empty string
         {
           output_file = args[i + 1];
           i++; // Skip the filename, it's not a real arg
@@ -282,44 +289,49 @@ int main(int argc, char *argv[])
     }
     real_args[real_arg_count] = NULL;
 
-    if (parse_error) continue;
-    if (real_args[0] == NULL) continue; // Empty command
+    if (parse_error)
+      continue;
+    if (real_args[0] == NULL)
+      continue; // Empty command
 
-    // --- (REFACTORED) Builtin Handling ---
-
-    // 5. Handle 'exit' (non-forked)
+    // --- (Builtin handling is unchanged) ---
     if (strcmp(real_args[0], "exit") == 0)
     {
       if (real_args[1] && strcmp(real_args[1], "0") == 0)
       {
         return 0; // Exit
       }
-      // Handle other exit codes later if needed
       return 0;
     }
 
-    // 6. Handle 'cd' (non-forked)
     if (strcmp(real_args[0], "cd") == 0)
     {
       char *path_to_change = NULL;
-      if (real_args[1] == NULL) {
-          path_to_change = getenv("HOME");
-      } else if (strcmp(real_args[1], "~") == 0) {
-          path_to_change = getenv("HOME");
-      } else {
-          path_to_change = real_args[1];
+      if (real_args[1] == NULL)
+      {
+        path_to_change = getenv("HOME");
       }
-      
-      if (path_to_change == NULL) {
-          fprintf(stderr, "cd: HOME not set\n");
-      } else if (chdir(path_to_change) != 0) {
-          fprintf(stderr, "cd: %s: %s\n", real_args[1], strerror(errno));
+      else if (strcmp(real_args[1], "~") == 0)
+      {
+        path_to_change = getenv("HOME");
+      }
+      else
+      {
+        path_to_change = real_args[1];
+      }
+
+      if (path_to_change == NULL)
+      {
+        fprintf(stderr, "cd: HOME not set\n");
+      }
+      else if (chdir(path_to_change) != 0)
+      {
+        fprintf(stderr, "cd: %s: %s\n", real_args[1], strerror(errno));
       }
       continue; // 'cd' is done, loop back
     }
 
-    // --- (NEW) Fork for *all* other commands (builtins & external) ---
-
+    // --- (Fork/Exec logic is unchanged) ---
     pid_t pid = fork();
 
     if (pid == -1)
@@ -333,20 +345,19 @@ int main(int argc, char *argv[])
       // 7. Handle Redirection
       if (output_file != NULL)
       {
-        // Open the file
         int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd == -1)
         {
           perror("open");
           exit(EXIT_FAILURE);
         }
-        
-        // Redirect stdout (FD 1) to the file
-        if (dup2(fd, STDOUT_FILENO) == -1) {
+
+        if (dup2(fd, STDOUT_FILENO) == -1)
+        {
           perror("dup2");
           exit(EXIT_FAILURE);
         }
-        close(fd); // We don't need the original fd anymore
+        close(fd);
       }
 
       // 8. Handle *forked* builtins
@@ -366,9 +377,10 @@ int main(int argc, char *argv[])
 
       if (strcmp(real_args[0], "type") == 0)
       {
-        char* arg = real_args[1];
-        if (arg == NULL) {
-            exit(0); // 'type' with no args
+        char *arg = real_args[1];
+        if (arg == NULL)
+        {
+          exit(0); // 'type' with no args
         }
         if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
             strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
