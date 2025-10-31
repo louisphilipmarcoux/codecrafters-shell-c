@@ -1,10 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>    // For strcmp, strncmp, strlen, strdup, strtok, strerror
-#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir()
+#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir(), STDOUT_FILENO, dup2, close
 #include <sys/wait.h>  // For waitpid()
 #include <sys/types.h> // For pid_t
 #include <errno.h>     // For errno (used with chdir)
+#include <fcntl.h>     // For open(), O_WRONLY, O_CREAT, O_TRUNC
 
 #define MAX_COMMAND_LENGTH 1024
 #define MAX_PATH_LENGTH 1024
@@ -75,103 +76,16 @@ int main(int argc, char *argv[])
       command[len - 1] = '\0';
     }
 
-    // 4. Handle empty input
-    if (strlen(command) == 0)
-    {
-      continue;
-    }
-
-    // --- Builtin Command Handling ---
-    // ... (Builtin handling is unchanged) ...
-
-    // 5. Check for 'exit 0'
-    if (strcmp(command, "exit 0") == 0)
-    {
-      return 0;
-    }
-
-    // 6. Check for 'pwd'
-    if (strcmp(command, "pwd") == 0)
-    {
-      char cwd_buffer[MAX_PATH_LENGTH];
-      if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL)
-      {
-        printf("%s\n", cwd_buffer);
-      }
-      else
-      {
-        perror("getcwd");
-      }
-      continue;
-    }
-
-    // 7. 'echo' builtin is removed
-
-    // 8. Check for 'cd'
-    if (strncmp(command, "cd ", 3) == 0)
-    {
-      char *path_arg = command + 3;
-      char *path_to_change = NULL;
-
-      if (strcmp(path_arg, "~") == 0)
-      {
-        path_to_change = getenv("HOME");
-        if (path_to_change == NULL)
-        {
-          fprintf(stderr, "cd: HOME not set\n");
-          continue;
-        }
-      }
-      else
-      {
-        path_to_change = path_arg;
-      }
-
-      if (chdir(path_to_change) != 0)
-      {
-        fprintf(stderr, "cd: %s: %s\n", path_arg, strerror(errno));
-      }
-      continue;
-    }
-
-    // 9. Check for 'type'
-    if (strncmp(command, "type ", 5) == 0)
-    {
-      char *arg = command + 5;
-
-      if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
-          strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
-          strcmp(arg, "cd") == 0)
-      {
-        printf("%s is a shell builtin\n", arg);
-      }
-      else
-      {
-        char full_path[MAX_PATH_LENGTH];
-        if (find_executable(arg, full_path, MAX_PATH_LENGTH))
-        {
-          printf("%s is %s\n", arg, full_path);
-        }
-        else
-        {
-          printf("%s: not found\n", arg);
-        }
-      }
-      continue;
-    }
-
-    // --- External Command Execution (UPDATED PARSER) ---
-
-    // 10. Parse the command and its arguments (with quote handling)
+    // --- (NEW PARSER) Parse command *before* checking builtins ---
     char *args[MAX_ARGS];
     int arg_index = 0;
 
-    char *read_ptr = command;  // Read from the original command string
-    char *write_ptr = command; // Write the parsed argument back into the same string
+    char *read_ptr = command;
+    char *write_ptr = command;
 
     int state = STATE_DEFAULT;
-    args[arg_index] = write_ptr; // The start of the first argument
-    int new_arg = 1;             // Flag to indicate if we're at the start of a new arg
+    args[arg_index] = write_ptr;
+    int new_arg = 1;
 
     while (*read_ptr != '\0')
     {
@@ -179,71 +93,102 @@ int main(int argc, char *argv[])
 
       if (state == STATE_DEFAULT)
       {
-        // NEW: Check for backslash escape *first*
         if (c == '\\')
         {
           read_ptr++; // Consume backslash
           if (*read_ptr == '\0')
-            break;                // Dangling backslash
-          *write_ptr = *read_ptr; // Copy escaped char literally
+            break;
+          *write_ptr = *read_ptr;
           write_ptr++;
-          read_ptr++; // Consume escaped char
+          read_ptr++;
           new_arg = 0;
         }
         else if (c == ' ')
-        {
-          // Space delimiter
+        { // Delimiter
           if (!new_arg)
-          {                    // Only end arg if we've written something to it
-            *write_ptr = '\0'; // Null-terminate the current argument
+          {
+            *write_ptr = '\0';
             write_ptr++;
-
-            // Start next argument
             arg_index++;
-            if (arg_index >= MAX_ARGS - 1)
-            {
-              fprintf(stderr, "Error: Too many arguments\n");
-              break;
-            }
+            if (arg_index >= MAX_ARGS - 1) break;
             args[arg_index] = write_ptr;
             new_arg = 1;
           }
-          read_ptr++; // Skip the space
+          read_ptr++; // Skip space
         }
         else if (c == '\'')
         {
-          // Start of single quote
           state = STATE_IN_QUOTE;
-          read_ptr++;  // Don't copy the quote
-          new_arg = 0; // We are now writing to an argument
+          read_ptr++;
+          new_arg = 0;
         }
         else if (c == '"')
         {
-          // Start of double quote
           state = STATE_IN_DQUOTE;
-          read_ptr++;  // Don't copy the quote
-          new_arg = 0; // We are now writing to an argument
+          read_ptr++;
+          new_arg = 0;
         }
+        // --- NEW: Handle redirection operators as delimiters ---
+        else if (c == '>')
+        { // Case: `>`
+          if (!new_arg)
+          { // Terminate previous arg
+            *write_ptr = '\0';
+            write_ptr++;
+            arg_index++;
+            if (arg_index >= MAX_ARGS - 1) break;
+          }
+          // Add ">" as its own argument
+          *write_ptr = '>';
+          write_ptr++;
+          *write_ptr = '\0';
+          write_ptr++;
+          args[arg_index] = write_ptr - 2; // Point to the ">"
+          arg_index++;
+          if (arg_index >= MAX_ARGS - 1) break;
+          new_arg = 1; // Ready for next arg
+          read_ptr++;  // Consume ">"
+        }
+        else if (c == '1' && read_ptr[1] == '>')
+        { // Case: `1>`
+          if (!new_arg)
+          { // Terminate previous arg
+            *write_ptr = '\0';
+            write_ptr++;
+            arg_index++;
+            if (arg_index >= MAX_ARGS - 1) break;
+          }
+          // Add "1>" as its own argument
+          *write_ptr = '1';
+          write_ptr++;
+          *write_ptr = '>';
+          write_ptr++;
+          *write_ptr = '\0';
+          write_ptr++;
+          args[arg_index] = write_ptr - 3; // Point to the "1>"
+          arg_index++;
+          if (arg_index >= MAX_ARGS - 1) break;
+          new_arg = 1; // Ready for next arg
+          read_ptr += 2; // Consume "1>"
+        }
+        // --- End of new logic ---
         else
         {
-          // Regular character
           *write_ptr = c;
           write_ptr++;
           read_ptr++;
-          new_arg = 0; // We are now writing to an argument
+          new_arg = 0;
         }
       }
       else if (state == STATE_IN_QUOTE)
       {
         if (c == '\'')
         {
-          // End of single quote
           state = STATE_DEFAULT;
-          read_ptr++; // Don't copy the quote
+          read_ptr++;
         }
         else
         {
-          // Literal character (backslashes are literal in single quotes)
           *write_ptr = c;
           write_ptr++;
           read_ptr++;
@@ -251,20 +196,17 @@ int main(int argc, char *argv[])
       }
       else if (state == STATE_IN_DQUOTE)
       {
-        // NEW: Handle backslash inside double quotes
         if (c == '\\')
         {
-          // Only escape \ and " (for this stage)
           if (read_ptr[1] == '\\' || read_ptr[1] == '"')
           {
-            read_ptr++;             // Consume backslash
-            *write_ptr = *read_ptr; // Copy escaped \ or "
+            read_ptr++;
+            *write_ptr = *read_ptr;
             write_ptr++;
-            read_ptr++; // Consume escaped char
+            read_ptr++;
           }
           else
           {
-            // Not escaping a special char, so treat \ literally
             *write_ptr = c;
             write_ptr++;
             read_ptr++;
@@ -272,64 +214,174 @@ int main(int argc, char *argv[])
         }
         else if (c == '"')
         {
-          // End of double quote
           state = STATE_DEFAULT;
-          read_ptr++; // Don't copy the quote
+          read_ptr++;
         }
         else
         {
-          // Literal character
           *write_ptr = c;
           write_ptr++;
           read_ptr++;
         }
       }
-    } // end while
+    } // end parser while
 
-    // Updated error handling for unclosed quotes
-    if (state == STATE_IN_QUOTE)
+    if (state != STATE_DEFAULT)
     {
-      fprintf(stderr, "Error: Unclosed single quote\n");
+      fprintf(stderr, "Error: Unclosed quote\n");
       continue;
     }
-    if (state == STATE_IN_DQUOTE)
-    {
-      fprintf(stderr, "Error: Unclosed double quote\n");
-      continue;
-    }
-
     *write_ptr = '\0'; // Null-terminate the last argument
-
-    // Set the next arg pointer to NULL for execv
     if (!new_arg)
-    { // If we were in the middle of writing an arg
+    {
       arg_index++;
     }
     args[arg_index] = NULL;
 
-    // 11. Check for empty command (e.g., just spaces or empty quotes)
-    if (args[0] == NULL)
+    // --- (NEW) Post-Parsing: Separate args from redirection ---
+    char *real_args[MAX_ARGS];
+    char *output_file = NULL;
+    int real_arg_count = 0;
+    int parse_error = 0;
+
+    for (int i = 0; args[i] != NULL; i++)
     {
-      continue;
+      if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
+      {
+        if (args[i + 1] != NULL)
+        {
+          output_file = args[i + 1];
+          i++; // Skip the filename, it's not a real arg
+        }
+        else
+        {
+          fprintf(stderr, "shell: syntax error near unexpected token `newline'\n");
+          parse_error = 1;
+          break;
+        }
+      }
+      else
+      {
+        real_args[real_arg_count] = args[i];
+        real_arg_count++;
+      }
+    }
+    real_args[real_arg_count] = NULL;
+
+    if (parse_error) continue;
+    if (real_args[0] == NULL) continue; // Empty command
+
+    // --- (REFACTORED) Builtin Handling ---
+
+    // 5. Handle 'exit' (non-forked)
+    if (strcmp(real_args[0], "exit") == 0)
+    {
+      if (real_args[1] && strcmp(real_args[1], "0") == 0)
+      {
+        return 0; // Exit
+      }
+      // Handle other exit codes later if needed
+      return 0;
     }
 
-    // --- (Execution logic is unchanged) ---
-    char *cmd_name = args[0];
-    char full_path[MAX_PATH_LENGTH];
-
-    // 12. Find and execute
-    if (find_executable(cmd_name, full_path, MAX_PATH_LENGTH))
+    // 6. Handle 'cd' (non-forked)
+    if (strcmp(real_args[0], "cd") == 0)
     {
-      pid_t pid = fork();
-
-      if (pid == -1)
-      {
-        perror("fork");
+      char *path_to_change = NULL;
+      if (real_args[1] == NULL) {
+          path_to_change = getenv("HOME");
+      } else if (strcmp(real_args[1], "~") == 0) {
+          path_to_change = getenv("HOME");
+      } else {
+          path_to_change = real_args[1];
       }
-      else if (pid == 0)
+      
+      if (path_to_change == NULL) {
+          fprintf(stderr, "cd: HOME not set\n");
+      } else if (chdir(path_to_change) != 0) {
+          fprintf(stderr, "cd: %s: %s\n", real_args[1], strerror(errno));
+      }
+      continue; // 'cd' is done, loop back
+    }
+
+    // --- (NEW) Fork for *all* other commands (builtins & external) ---
+
+    pid_t pid = fork();
+
+    if (pid == -1)
+    {
+      perror("fork");
+    }
+    else if (pid == 0)
+    {
+      // --- This is the Child Process ---
+
+      // 7. Handle Redirection
+      if (output_file != NULL)
       {
-        // Child Process
-        if (execv(full_path, args) == -1)
+        // Open the file
+        int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd == -1)
+        {
+          perror("open");
+          exit(EXIT_FAILURE);
+        }
+        
+        // Redirect stdout (FD 1) to the file
+        if (dup2(fd, STDOUT_FILENO) == -1) {
+          perror("dup2");
+          exit(EXIT_FAILURE);
+        }
+        close(fd); // We don't need the original fd anymore
+      }
+
+      // 8. Handle *forked* builtins
+      if (strcmp(real_args[0], "pwd") == 0)
+      {
+        char cwd_buffer[MAX_PATH_LENGTH];
+        if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL)
+        {
+          printf("%s\n", cwd_buffer);
+        }
+        else
+        {
+          perror("getcwd");
+        }
+        exit(0); // Exit child
+      }
+
+      if (strcmp(real_args[0], "type") == 0)
+      {
+        char* arg = real_args[1];
+        if (arg == NULL) {
+            exit(0); // 'type' with no args
+        }
+        if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
+            strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
+            strcmp(arg, "cd") == 0)
+        {
+          printf("%s is a shell builtin\n", arg);
+        }
+        else
+        {
+          char full_path[MAX_PATH_LENGTH];
+          if (find_executable(arg, full_path, MAX_PATH_LENGTH))
+          {
+            printf("%s is %s\n", arg, full_path);
+          }
+          else
+          {
+            printf("%s: not found\n", arg);
+          }
+        }
+        exit(0); // Exit child
+      }
+
+      // 9. Handle External Commands
+      char full_path[MAX_PATH_LENGTH];
+      if (find_executable(real_args[0], full_path, MAX_PATH_LENGTH))
+      {
+        if (execv(full_path, real_args) == -1)
         {
           perror("execv");
           exit(EXIT_FAILURE);
@@ -337,15 +389,15 @@ int main(int argc, char *argv[])
       }
       else
       {
-        // Parent Process
-        int status;
-        waitpid(pid, &status, 0);
+        fprintf(stderr, "%s: command not found\n", real_args[0]);
+        exit(127); // Standard exit code for "command not found"
       }
     }
     else
     {
-      // 13. If not found, print error
-      fprintf(stderr, "%s: command not found\n", cmd_name);
+      // --- This is the Parent Process ---
+      int status;
+      waitpid(pid, &status, 0);
     }
   }
 
