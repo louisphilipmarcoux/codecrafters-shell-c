@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>    // For strcmp, strncmp, strlen, strdup, strtok, strerror
-#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir(), dup2(), close()
+#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir()
 #include <sys/wait.h>  // For waitpid()
 #include <sys/types.h> // For pid_t
 #include <errno.h>     // For errno (used with chdir)
@@ -52,71 +52,75 @@ int find_executable(const char *command, char *full_path, size_t full_path_size)
 }
 
 /**
- * Parse command line and extract stdout redirect file if present.
+ * Parse command line and extract redirect files if present.
  * Returns the index where redirection starts, or -1 if no redirection.
+ * Updates redirect_stdout and redirect_stderr with filenames.
  */
-int find_stdout_redirect(char **args, char **redirect_file)
+int find_redirect(char **args, char **redirect_stdout, char **redirect_stderr)
 {
-  *redirect_file = NULL;
+  *redirect_stdout = NULL;
+  *redirect_stderr = NULL;
+  int first_redirect_idx = -1;
 
   for (int i = 0; args[i] != NULL; i++)
   {
-    // Check for > or 1>
+    // Check for > or 1> (stdout)
     if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
     {
       if (args[i + 1] == NULL)
       {
-        fprintf(stderr, "Error: No file specified for stdout redirection\n");
+        fprintf(stderr, "Error: No file specified for redirection\n");
         return -2; // Error case
       }
-      *redirect_file = args[i + 1];
-      return i; // Return index of redirect operator
+      *redirect_stdout = args[i + 1];
+      if (first_redirect_idx == -1)
+        first_redirect_idx = i;
     }
-  }
-
-  return -1; // No redirection found
-}
-
-/**
- * Parse command line and extract stderr redirect file if present.
- * Returns the index where redirection starts, or -1 if no redirection.
- */
-int find_stderr_redirect(char **args, char **redirect_file)
-{
-  *redirect_file = NULL;
-
-  for (int i = 0; args[i] != NULL; i++)
-  {
-    // Check for 2>
-    if (strcmp(args[i], "2>") == 0)
+    // Check for 2> (stderr)
+    else if (strcmp(args[i], "2>") == 0)
     {
       if (args[i + 1] == NULL)
       {
-        fprintf(stderr, "Error: No file specified for stderr redirection\n");
+        fprintf(stderr, "Error: No file specified for redirection\n");
         return -2; // Error case
       }
-      *redirect_file = args[i + 1];
-      return i; // Return index of redirect operator
+      *redirect_stderr = args[i + 1];
+      if (first_redirect_idx == -1)
+        first_redirect_idx = i;
     }
   }
 
-  return -1; // No redirection found
+  return first_redirect_idx;
 }
 
 /**
  * Execute echo builtin with optional output redirection.
  */
-void execute_echo(char **args, int redirect_idx, char *redirect_file)
+void execute_echo(char **args, int redirect_idx, char *redirect_stdout, char *redirect_stderr)
 {
   FILE *output = stdout;
+  FILE *error = stderr;
 
   // Handle stdout redirection
-  if (redirect_file != NULL)
+  if (redirect_stdout != NULL)
   {
-    output = fopen(redirect_file, "w");
+    output = fopen(redirect_stdout, "w");
     if (output == NULL)
     {
       perror("fopen");
+      return;
+    }
+  }
+
+  // Handle stderr redirection (echo doesn't produce stderr, but for consistency)
+  if (redirect_stderr != NULL)
+  {
+    error = fopen(redirect_stderr, "w");
+    if (error == NULL)
+    {
+      perror("fopen");
+      if (output != stdout)
+        fclose(output);
       return;
     }
   }
@@ -133,22 +137,37 @@ void execute_echo(char **args, int redirect_idx, char *redirect_file)
 
   if (output != stdout)
     fclose(output);
+  if (error != stderr)
+    fclose(error);
 }
 
 /**
  * Execute pwd builtin with optional output redirection.
  */
-void execute_pwd(char *redirect_file)
+void execute_pwd(char *redirect_stdout, char *redirect_stderr)
 {
   char cwd_buffer[MAX_PATH_LENGTH];
   FILE *output = stdout;
+  FILE *error = stderr;
 
-  if (redirect_file != NULL)
+  if (redirect_stdout != NULL)
   {
-    output = fopen(redirect_file, "w");
+    output = fopen(redirect_stdout, "w");
     if (output == NULL)
     {
       perror("fopen");
+      return;
+    }
+  }
+
+  if (redirect_stderr != NULL)
+  {
+    error = fopen(redirect_stderr, "w");
+    if (error == NULL)
+    {
+      perror("fopen");
+      if (output != stdout)
+        fclose(output);
       return;
     }
   }
@@ -164,6 +183,8 @@ void execute_pwd(char *redirect_file)
 
   if (output != stdout)
     fclose(output);
+  if (error != stderr)
+    fclose(error);
 }
 
 int main(int argc, char *argv[])
@@ -332,47 +353,19 @@ int main(int argc, char *argv[])
     }
 
     // --- Check for output redirection ---
-    char *stdout_redirect_file = NULL;
-    int stdout_redirect_idx = find_stdout_redirect(args, &stdout_redirect_file);
+    char *redirect_stdout = NULL;
+    char *redirect_stderr = NULL;
+    int redirect_idx = find_redirect(args, &redirect_stdout, &redirect_stderr);
 
-    if (stdout_redirect_idx == -2)
+    if (redirect_idx == -2)
     {
-      continue; // Error in stdout redirection syntax
+      continue; // Error in redirection syntax
     }
 
-    // --- Check for stderr redirection ---
-    char *stderr_redirect_file = NULL;
-    int stderr_redirect_idx = find_stderr_redirect(args, &stderr_redirect_file);
-
-    if (stderr_redirect_idx == -2)
-    {
-      continue; // Error in stderr redirection syntax
-    }
-
-    // Find the first redirection operator to truncate args for builtins
-    int redirect_idx = -1;
-    if (stdout_redirect_idx >= 0 && stderr_redirect_idx >= 0)
-    {
-      redirect_idx = (stdout_redirect_idx < stderr_redirect_idx) ? stdout_redirect_idx : stderr_redirect_idx;
-    }
-    else if (stdout_redirect_idx >= 0)
-    {
-      redirect_idx = stdout_redirect_idx;
-    }
-    else if (stderr_redirect_idx >= 0)
-    {
-      redirect_idx = stderr_redirect_idx;
-    }
-
-    char *temp_arg = NULL;
-    int temp_idx = -1;
-
-    // Temporarily null-terminate at the *first* redirect for builtins
+    // Null-terminate args at first redirect operator
     if (redirect_idx >= 0)
     {
-      temp_idx = redirect_idx;
-      temp_arg = args[temp_idx];
-      args[temp_idx] = NULL;
+      args[redirect_idx] = NULL;
     }
 
     // --- Builtin Command Handling ---
@@ -386,19 +379,14 @@ int main(int argc, char *argv[])
     // 6. Check for 'pwd'
     if (strcmp(args[0], "pwd") == 0)
     {
-      execute_pwd(stdout_redirect_file);
-      if (temp_idx >= 0)
-        args[temp_idx] = temp_arg; // Restore arg
+      execute_pwd(redirect_stdout, redirect_stderr);
       continue;
     }
 
     // 7. Check for 'echo'
     if (strcmp(args[0], "echo") == 0)
     {
-      // echo builtin only cares about stdout redirection
-      execute_echo(args, stdout_redirect_idx, stdout_redirect_file);
-      if (temp_idx >= 0)
-        args[temp_idx] = temp_arg; // Restore arg
+      execute_echo(args, redirect_idx, redirect_stdout, redirect_stderr);
       continue;
     }
 
@@ -408,8 +396,6 @@ int main(int argc, char *argv[])
       if (args[1] == NULL)
       {
         fprintf(stderr, "cd: missing argument\n");
-        if (temp_idx >= 0)
-          args[temp_idx] = temp_arg; // Restore arg
         continue;
       }
 
@@ -421,8 +407,6 @@ int main(int argc, char *argv[])
         if (path_to_change == NULL)
         {
           fprintf(stderr, "cd: HOME not set\n");
-          if (temp_idx >= 0)
-            args[temp_idx] = temp_arg; // Restore arg
           continue;
         }
       }
@@ -435,8 +419,6 @@ int main(int argc, char *argv[])
       {
         fprintf(stderr, "cd: %s: %s\n", args[1], strerror(errno));
       }
-      if (temp_idx >= 0)
-        args[temp_idx] = temp_arg; // Restore arg
       continue;
     }
 
@@ -446,15 +428,11 @@ int main(int argc, char *argv[])
       if (args[1] == NULL)
       {
         fprintf(stderr, "type: missing argument\n");
-        if (temp_idx >= 0)
-          args[temp_idx] = temp_arg; // Restore arg
         continue;
       }
 
       char *arg = args[1];
 
-      // TODO: 'type' builtin should also respect stdout redirection
-      // For now, it prints directly to stdout
       if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
           strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
           strcmp(arg, "cd") == 0)
@@ -473,29 +451,10 @@ int main(int argc, char *argv[])
           printf("%s: not found\n", arg);
         }
       }
-      if (temp_idx >= 0)
-        args[temp_idx] = temp_arg; // Restore arg
       continue;
     }
 
-    // Restore args if we modified it
-    if (temp_idx >= 0)
-    {
-      args[temp_idx] = temp_arg;
-    }
-
     // --- External Command Execution ---
-
-    // Null-terminate args at *all* redirect locations for execv
-    if (stdout_redirect_idx >= 0)
-    {
-      args[stdout_redirect_idx] = NULL;
-    }
-    if (stderr_redirect_idx >= 0)
-    {
-      args[stderr_redirect_idx] = NULL;
-    }
-
     char *cmd_name = args[0];
     char full_path[MAX_PATH_LENGTH];
 
@@ -511,43 +470,43 @@ int main(int argc, char *argv[])
       {
         // Child Process
 
-        // Handle output (stdout) redirection
-        if (stdout_redirect_file != NULL)
+        // Handle stdout redirection
+        if (redirect_stdout != NULL)
         {
-          int fd = open(stdout_redirect_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          int fd = open(redirect_stdout, O_WRONLY | O_CREAT | O_TRUNC, 0644);
           if (fd == -1)
           {
-            perror("open (stdout)");
+            perror("open");
             exit(EXIT_FAILURE);
           }
 
-          // Redirect stdout to the file
           if (dup2(fd, STDOUT_FILENO) == -1)
           {
-            perror("dup2 (stdout)");
+            perror("dup2");
             close(fd);
             exit(EXIT_FAILURE);
           }
+
           close(fd);
         }
 
-        // Handle error (stderr) redirection
-        if (stderr_redirect_file != NULL)
+        // Handle stderr redirection
+        if (redirect_stderr != NULL)
         {
-          int fd = open(stderr_redirect_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          int fd = open(redirect_stderr, O_WRONLY | O_CREAT | O_TRUNC, 0644);
           if (fd == -1)
           {
-            perror("open (stderr)");
+            perror("open");
             exit(EXIT_FAILURE);
           }
 
-          // Redirect stderr to the file
           if (dup2(fd, STDERR_FILENO) == -1)
           {
-            perror("dup2 (stderr)");
+            perror("dup2");
             close(fd);
             exit(EXIT_FAILURE);
           }
+
           close(fd);
         }
 
