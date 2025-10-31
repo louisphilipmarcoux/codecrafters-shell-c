@@ -21,7 +21,6 @@ enum
 
 /**
  * Helper function to find an executable in PATH.
- * ... (This function is unchanged) ...
  */
 int find_executable(const char *command, char *full_path, size_t full_path_size)
 {
@@ -84,7 +83,7 @@ int main(int argc, char *argv[])
     char *write_ptr = command;
 
     int state = STATE_DEFAULT;
-    args[arg_index] = write_ptr; // Set pointer for first arg *before* loop
+    args[arg_index] = write_ptr;
     int new_arg = 1;
 
     while (*read_ptr != '\0')
@@ -98,14 +97,14 @@ int main(int argc, char *argv[])
           if (new_arg)
           {
             args[arg_index] = write_ptr;
-          } // FIX
+            new_arg = 0;
+          }
           read_ptr++; // Consume backslash
           if (*read_ptr == '\0')
             break;
           *write_ptr = *read_ptr;
           write_ptr++;
           read_ptr++;
-          new_arg = 0;
         }
         else if (c == ' ')
         { // Delimiter
@@ -116,7 +115,6 @@ int main(int argc, char *argv[])
             arg_index++;
             if (arg_index >= MAX_ARGS - 1)
               break;
-            args[arg_index] = write_ptr; // Set pointer for *next* arg
             new_arg = 1;
           }
           read_ptr++; // Skip space
@@ -126,27 +124,22 @@ int main(int argc, char *argv[])
           if (new_arg)
           {
             args[arg_index] = write_ptr;
-          } // FIX
+            new_arg = 0;
+          }
           state = STATE_IN_QUOTE;
           read_ptr++;
-          new_arg = 0;
         }
         else if (c == '"')
         {
           if (new_arg)
           {
             args[arg_index] = write_ptr;
-          } // FIX
+            new_arg = 0;
+          }
           state = STATE_IN_DQUOTE;
           read_ptr++;
-          new_arg = 0;
         }
-        //
-        // --- KEY AREA 1: PARSING REDIRECTION TOKENS ---
-        // This logic identifies `1>` and `>` as separate tokens
-        // and sets `new_arg = 1` to signal that the *next*
-        // item (the filename) is a new argument.
-        //
+        // --- FIXED REDIRECTION PARSING ---
         else if (c == '1' && read_ptr[1] == '>')
         { // Case: `1>`
           if (!new_arg)
@@ -158,13 +151,13 @@ int main(int argc, char *argv[])
               break;
           }
           // Add "1>" as its own argument
+          args[arg_index] = write_ptr;
           *write_ptr = '1';
           write_ptr++;
           *write_ptr = '>';
           write_ptr++;
           *write_ptr = '\0';
           write_ptr++;
-          args[arg_index] = write_ptr - 3; // Point to the "1>"
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
@@ -182,11 +175,11 @@ int main(int argc, char *argv[])
               break;
           }
           // Add ">" as its own argument
+          args[arg_index] = write_ptr;
           *write_ptr = '>';
           write_ptr++;
           *write_ptr = '\0';
           write_ptr++;
-          args[arg_index] = write_ptr - 2; // Point to the ">"
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
@@ -195,21 +188,14 @@ int main(int argc, char *argv[])
         }
         else
         {
-          //
-          // --- THIS IS THE FIX ---
-          // Because `new_arg` was set to 1 by the `>` block,
-          // this `if` statement catches the first character
-          // of the filename and sets `args[arg_index]` to
-          // point to it. This prevents the "syntax error".
-          //
           if (new_arg)
           {
             args[arg_index] = write_ptr;
-          } // <<< ***FIX***
+            new_arg = 0;
+          }
           *write_ptr = c;
           write_ptr++;
           read_ptr++;
-          new_arg = 0;
         }
       }
       else if (state == STATE_IN_QUOTE)
@@ -270,11 +256,7 @@ int main(int argc, char *argv[])
     }
     args[arg_index] = NULL;
 
-    // --- KEY AREA 2: POST-PARSING FOR REDIRECTION ---
-    // This loop scans the parsed `args` array. It separates
-    // the command arguments (like `ls`, `-1`) from the
-    // redirection operator and filename.
-    //
+    // --- POST-PARSING FOR REDIRECTION ---
     char *real_args[MAX_ARGS];
     char *output_file = NULL;
     int real_arg_count = 0;
@@ -291,8 +273,6 @@ int main(int argc, char *argv[])
         }
         else
         {
-          // This is the error your log shows. It happens
-          // if `args[i+1]` is NULL.
           fprintf(stderr, "shell: syntax error near unexpected token `newline'\n");
           parse_error = 1;
           break;
@@ -311,7 +291,7 @@ int main(int argc, char *argv[])
     if (real_args[0] == NULL)
       continue; // Empty command
 
-    // --- (REFACTORED) Builtin Handling ---
+    // --- Builtin Handling ---
 
     // 5. Handle 'exit' (non-forked)
     if (strcmp(real_args[0], "exit") == 0)
@@ -352,7 +332,7 @@ int main(int argc, char *argv[])
       continue; // 'cd' is done, loop back
     }
 
-    // --- (NEW) Fork for *all* other commands (builtins & external) ---
+    // --- Fork for *all* other commands (builtins & external) ---
 
     pid_t pid = fork();
 
@@ -364,12 +344,7 @@ int main(int argc, char *argv[])
     {
       // --- This is the Child Process ---
 
-      // --- KEY AREA 3: PERFORMING REDIRECTION ---
-      // If an output file was specified, this code runs
-      // *before* `execv`. It opens the file and uses
-      // `dup2` to make STDOUT_FILENO (file descriptor 1)
-      // point to the opened file.
-      //
+      // --- PERFORMING REDIRECTION ---
       if (output_file != NULL)
       {
         // Open the file
@@ -389,7 +364,7 @@ int main(int argc, char *argv[])
         close(fd); // We don't need the original fd anymore
       }
 
-      // 8. Handle *forked* builtins
+      // Handle *forked* builtins
       if (strcmp(real_args[0], "pwd") == 0)
       {
         char cwd_buffer[MAX_PATH_LENGTH];
@@ -432,7 +407,7 @@ int main(int argc, char *argv[])
         exit(0); // Exit child
       }
 
-      // 9. Handle External Commands
+      // Handle External Commands
       char full_path[MAX_PATH_LENGTH];
       if (find_executable(real_args[0], full_path, MAX_PATH_LENGTH))
       {
