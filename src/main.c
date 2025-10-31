@@ -75,7 +75,7 @@ int main(int argc, char *argv[])
       command[len - 1] = '\0';
     }
 
-    // --- (CORRECTED PARSER) ---
+    // --- Command parsing ---
     char *args[MAX_ARGS];
     int arg_index = 0;
 
@@ -99,25 +99,22 @@ int main(int argc, char *argv[])
             args[arg_index] = write_ptr;
             new_arg = 0;
           }
-          read_ptr++; // Consume backslash
+          read_ptr++;
           if (*read_ptr == '\0')
             break;
-          *write_ptr = *read_ptr;
-          write_ptr++;
-          read_ptr++;
+          *write_ptr++ = *read_ptr++;
         }
         else if (c == ' ')
-        { // Delimiter
+        {
           if (!new_arg)
           {
-            *write_ptr = '\0';
-            write_ptr++;
+            *write_ptr++ = '\0';
             arg_index++;
             if (arg_index >= MAX_ARGS - 1)
               break;
             new_arg = 1;
           }
-          read_ptr++; // Skip space
+          read_ptr++;
         }
         else if (c == '\'')
         {
@@ -139,52 +136,45 @@ int main(int argc, char *argv[])
           state = STATE_IN_DQUOTE;
           read_ptr++;
         }
-        // --- FIXED REDIRECTION PARSING ---
+        // --- Redirection Parsing ---
         else if (c == '1' && read_ptr[1] == '>')
-        { // Case: `1>`
+        {
           if (!new_arg)
-          { // Terminate previous arg
-            *write_ptr = '\0';
-            write_ptr++;
+          {
+            *write_ptr++ = '\0';
             arg_index++;
             if (arg_index >= MAX_ARGS - 1)
               break;
           }
-          // Add "1>" as its own argument
           args[arg_index] = write_ptr;
-          *write_ptr = '1';
-          write_ptr++;
-          *write_ptr = '>';
-          write_ptr++;
-          *write_ptr = '\0';
-          write_ptr++;
+          *write_ptr++ = '1';
+          *write_ptr++ = '>';
+          *write_ptr++ = '\0';
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
-          new_arg = 1;                 // Ready for next arg (the filename)
-          read_ptr += 2;               // Consume "1>"
+          new_arg = 1;
+          args[arg_index] = write_ptr; // ✅ fix: prepare next arg slot
+          read_ptr += 2;
         }
         else if (c == '>')
-        { // Case: `>`
+        {
           if (!new_arg)
-          { // Terminate previous arg
-            *write_ptr = '\0';
-            write_ptr++;
+          {
+            *write_ptr++ = '\0';
             arg_index++;
             if (arg_index >= MAX_ARGS - 1)
               break;
           }
-          // Add ">" as its own argument
           args[arg_index] = write_ptr;
-          *write_ptr = '>';
-          write_ptr++;
-          *write_ptr = '\0';
-          write_ptr++;
+          *write_ptr++ = '>';
+          *write_ptr++ = '\0';
           arg_index++;
           if (arg_index >= MAX_ARGS - 1)
             break;
-          new_arg = 1;                 // Ready for next arg (the filename)
-          read_ptr++;                  // Consume ">"
+          new_arg = 1;
+          args[arg_index] = write_ptr; // ✅ fix: prepare next arg slot
+          read_ptr++;
         }
         else
         {
@@ -193,8 +183,7 @@ int main(int argc, char *argv[])
             args[arg_index] = write_ptr;
             new_arg = 0;
           }
-          *write_ptr = c;
-          write_ptr++;
+          *write_ptr++ = c;
           read_ptr++;
         }
       }
@@ -207,8 +196,7 @@ int main(int argc, char *argv[])
         }
         else
         {
-          *write_ptr = c;
-          write_ptr++;
+          *write_ptr++ = c;
           read_ptr++;
         }
       }
@@ -219,14 +207,11 @@ int main(int argc, char *argv[])
           if (read_ptr[1] == '\\' || read_ptr[1] == '"')
           {
             read_ptr++;
-            *write_ptr = *read_ptr;
-            write_ptr++;
-            read_ptr++;
+            *write_ptr++ = *read_ptr++;
           }
           else
           {
-            *write_ptr = c;
-            write_ptr++;
+            *write_ptr++ = c;
             read_ptr++;
           }
         }
@@ -237,26 +222,24 @@ int main(int argc, char *argv[])
         }
         else
         {
-          *write_ptr = c;
-          write_ptr++;
+          *write_ptr++ = c;
           read_ptr++;
         }
       }
-    } // end parser while
+    }
 
     if (state != STATE_DEFAULT)
     {
       fprintf(stderr, "Error: Unclosed quote\n");
       continue;
     }
-    *write_ptr = '\0'; // Null-terminate the last argument
+
+    *write_ptr = '\0';
     if (!new_arg)
-    {
       arg_index++;
-    }
     args[arg_index] = NULL;
 
-    // --- POST-PARSING FOR REDIRECTION ---
+    // --- Handle redirection ---
     char *real_args[MAX_ARGS];
     char *output_file = NULL;
     int real_arg_count = 0;
@@ -266,10 +249,10 @@ int main(int argc, char *argv[])
     {
       if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
       {
-        if (args[i + 1] != NULL) // Check for the filename
+        if (args[i + 1] != NULL)
         {
           output_file = args[i + 1];
-          i++; // Skip the filename, it's not a real arg
+          i++;
         }
         else
         {
@@ -280,8 +263,7 @@ int main(int argc, char *argv[])
       }
       else
       {
-        real_args[real_arg_count] = args[i];
-        real_arg_count++;
+        real_args[real_arg_count++] = args[i];
       }
     }
     real_args[real_arg_count] = NULL;
@@ -289,38 +271,17 @@ int main(int argc, char *argv[])
     if (parse_error)
       continue;
     if (real_args[0] == NULL)
-      continue; // Empty command
+      continue;
 
-    // --- Builtin Handling ---
-
-    // 5. Handle 'exit' (non-forked)
+    // --- Built-in commands (non-forked) ---
     if (strcmp(real_args[0], "exit") == 0)
     {
-      if (real_args[1] && strcmp(real_args[1], "0") == 0)
-      {
-        return 0; // Exit
-      }
-      // Handle other exit codes later if needed
       return 0;
     }
 
-    // 6. Handle 'cd' (non-forked)
     if (strcmp(real_args[0], "cd") == 0)
     {
-      char *path_to_change = NULL;
-      if (real_args[1] == NULL)
-      {
-        path_to_change = getenv("HOME");
-      }
-      else if (strcmp(real_args[1], "~") == 0)
-      {
-        path_to_change = getenv("HOME");
-      }
-      else
-      {
-        path_to_change = real_args[1];
-      }
-
+      char *path_to_change = real_args[1] ? real_args[1] : getenv("HOME");
       if (path_to_change == NULL)
       {
         fprintf(stderr, "cd: HOME not set\n");
@@ -329,11 +290,10 @@ int main(int argc, char *argv[])
       {
         fprintf(stderr, "cd: %s: %s\n", real_args[1], strerror(errno));
       }
-      continue; // 'cd' is done, loop back
+      continue;
     }
 
-    // --- Fork for *all* other commands (builtins & external) ---
-
+    // --- Fork and execute ---
     pid_t pid = fork();
 
     if (pid == -1)
@@ -342,50 +302,39 @@ int main(int argc, char *argv[])
     }
     else if (pid == 0)
     {
-      // --- This is the Child Process ---
-
-      // --- PERFORMING REDIRECTION ---
+      // --- Child process ---
       if (output_file != NULL)
       {
-        // Open the file
         int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd == -1)
         {
           perror("open");
           exit(EXIT_FAILURE);
         }
-
-        // Redirect stdout (FD 1) to the file
         if (dup2(fd, STDOUT_FILENO) == -1)
         {
           perror("dup2");
           exit(EXIT_FAILURE);
         }
-        close(fd); // We don't need the original fd anymore
+        close(fd);
       }
 
-      // Handle *forked* builtins
       if (strcmp(real_args[0], "pwd") == 0)
       {
         char cwd_buffer[MAX_PATH_LENGTH];
         if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL)
-        {
           printf("%s\n", cwd_buffer);
-        }
         else
-        {
           perror("getcwd");
-        }
-        exit(0); // Exit child
+        exit(0);
       }
 
       if (strcmp(real_args[0], "type") == 0)
       {
         char *arg = real_args[1];
         if (arg == NULL)
-        {
-          exit(0); // 'type' with no args
-        }
+          exit(0);
+
         if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
             strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
             strcmp(arg, "cd") == 0)
@@ -396,38 +345,28 @@ int main(int argc, char *argv[])
         {
           char full_path[MAX_PATH_LENGTH];
           if (find_executable(arg, full_path, MAX_PATH_LENGTH))
-          {
             printf("%s is %s\n", arg, full_path);
-          }
           else
-          {
             printf("%s: not found\n", arg);
-          }
         }
-        exit(0); // Exit child
+        exit(0);
       }
 
-      // Handle External Commands
       char full_path[MAX_PATH_LENGTH];
       if (find_executable(real_args[0], full_path, MAX_PATH_LENGTH))
       {
-        // `execv` now runs, and its output (stdout)
-        // automatically goes to the file opened above.
-        if (execv(full_path, real_args) == -1)
-        {
-          perror("execv");
-          exit(EXIT_FAILURE);
-        }
+        execv(full_path, real_args);
+        perror("execv");
+        exit(EXIT_FAILURE);
       }
       else
       {
         fprintf(stderr, "%s: command not found\n", real_args[0]);
-        exit(127); // Standard exit code for "command not found"
+        exit(127);
       }
     }
     else
     {
-      // --- This is the Parent Process ---
       int status;
       waitpid(pid, &status, 0);
     }
