@@ -98,6 +98,9 @@ int main(int argc, char *argv[])
           read_ptr++; // Consume backslash
           if (*read_ptr == '\0')
             break;
+          if (new_arg) { // Handle case like `\` as first char of arg
+            args[arg_index] = write_ptr;
+          }
           *write_ptr = *read_ptr;
           write_ptr++;
           read_ptr++;
@@ -118,12 +121,18 @@ int main(int argc, char *argv[])
         }
         else if (c == '\'')
         {
+          if (new_arg) {
+            args[arg_index] = write_ptr;
+          }
           state = STATE_IN_QUOTE;
           read_ptr++;
           new_arg = 0;
         }
         else if (c == '"')
         {
+          if (new_arg) {
+            args[arg_index] = write_ptr;
+          }
           state = STATE_IN_DQUOTE;
           read_ptr++;
           new_arg = 0;
@@ -146,6 +155,7 @@ int main(int argc, char *argv[])
           args[arg_index] = write_ptr - 2; // Point to the ">"
           arg_index++;
           if (arg_index >= MAX_ARGS - 1) break;
+          args[arg_index] = write_ptr; // <<< ***FIX 1: ADD THIS LINE***
           new_arg = 1; // Ready for next arg
           read_ptr++;  // Consume ">"
         }
@@ -168,12 +178,16 @@ int main(int argc, char *argv[])
           args[arg_index] = write_ptr - 3; // Point to the "1>"
           arg_index++;
           if (arg_index >= MAX_ARGS - 1) break;
+          args[arg_index] = write_ptr; // <<< ***FIX 2: ADD THIS LINE***
           new_arg = 1; // Ready for next arg
           read_ptr += 2; // Consume "1>"
         }
         // --- End of new logic ---
         else
         {
+          if (new_arg) { // <<< ***FIX 3: ADD THIS BLOCK***
+            args[arg_index] = write_ptr;
+          }
           *write_ptr = c;
           write_ptr++;
           read_ptr++;
