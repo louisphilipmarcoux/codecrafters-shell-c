@@ -179,7 +179,18 @@ int main(int argc, char *argv[])
 
       if (state == STATE_DEFAULT)
       {
-        if (c == ' ')
+        // NEW: Check for backslash escape *first*
+        if (c == '\\')
+        {
+          read_ptr++; // Consume backslash
+          if (*read_ptr == '\0')
+            break;                // Dangling backslash
+          *write_ptr = *read_ptr; // Copy escaped char literally
+          write_ptr++;
+          read_ptr++; // Consume escaped char
+          new_arg = 0;
+        }
+        else if (c == ' ')
         {
           // Space delimiter
           if (!new_arg)
@@ -206,7 +217,7 @@ int main(int argc, char *argv[])
           read_ptr++;  // Don't copy the quote
           new_arg = 0; // We are now writing to an argument
         }
-        else if (c == '"') // NEW: Check for double quote
+        else if (c == '"')
         {
           // Start of double quote
           state = STATE_IN_DQUOTE;
@@ -232,15 +243,34 @@ int main(int argc, char *argv[])
         }
         else
         {
-          // Literal character
+          // Literal character (backslashes are literal in single quotes)
           *write_ptr = c;
           write_ptr++;
           read_ptr++;
         }
       }
-      else if (state == STATE_IN_DQUOTE) // NEW: Handle double quote state
+      else if (state == STATE_IN_DQUOTE)
       {
-        if (c == '"')
+        // NEW: Handle backslash inside double quotes
+        if (c == '\\')
+        {
+          // Only escape \ and " (for this stage)
+          if (read_ptr[1] == '\\' || read_ptr[1] == '"')
+          {
+            read_ptr++;             // Consume backslash
+            *write_ptr = *read_ptr; // Copy escaped \ or "
+            write_ptr++;
+            read_ptr++; // Consume escaped char
+          }
+          else
+          {
+            // Not escaping a special char, so treat \ literally
+            *write_ptr = c;
+            write_ptr++;
+            read_ptr++;
+          }
+        }
+        else if (c == '"')
         {
           // End of double quote
           state = STATE_DEFAULT;
@@ -256,7 +286,7 @@ int main(int argc, char *argv[])
       }
     } // end while
 
-    // NEW: Updated error handling for unclosed quotes
+    // Updated error handling for unclosed quotes
     if (state == STATE_IN_QUOTE)
     {
       fprintf(stderr, "Error: Unclosed single quote\n");
