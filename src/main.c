@@ -83,7 +83,6 @@ int main(int argc, char *argv[])
     }
 
     // --- Builtin Command Handling ---
-    // (Builtin checks remain unchanged)
 
     // 5. Check for 'exit 0'
     if (strcmp(command, "exit 0") == 0)
@@ -106,15 +105,9 @@ int main(int argc, char *argv[])
       continue;
     }
 
-    // 7. Check for 'echo' (simple version)
-    if (strncmp(command, "echo ", 5) == 0)
-    {
-      // This will only catch simple echos.
-      // Quoted echos will fail this check and be passed
-      // to the external command parser, which is correct.
-      printf("%s\n", command + 5);
-      continue;
-    }
+    // 7. 'echo' builtin REMOVED
+    // The 'echo' command will now be handled by the
+    // external command parser below.
 
     // 8. Check for 'cd'
     if (strncmp(command, "cd ", 3) == 0)
@@ -133,6 +126,9 @@ int main(int argc, char *argv[])
       }
       else
       {
+        // This argument parsing is still too simple and will fail
+        // on `cd 'path with spaces'`. We'll fix this later.
+        // For now, it handles simple paths and `~`.
         path_to_change = path_arg;
       }
 
@@ -148,9 +144,9 @@ int main(int argc, char *argv[])
     {
       char *arg = command + 5;
 
-      if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
-          strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
-          strcmp(arg, "cd") == 0)
+      // 'echo' is REMOVED from the builtin list
+      if (strcmp(arg, "exit") == 0 || strcmp(arg, "type") == 0 ||
+          strcmp(arg, "pwd") == 0 || strcmp(arg, "cd") == 0)
       {
         printf("%s is a shell builtin\n", arg);
       }
