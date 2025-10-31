@@ -6,6 +6,8 @@
 #include <sys/types.h> // For pid_t
 #include <errno.h>     // For errno (used with chdir)
 #include <fcntl.h>     // For open(), O_WRONLY, O_CREAT, O_TRUNC
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #define MAX_COMMAND_LENGTH 1024
 #define MAX_PATH_LENGTH 1024
