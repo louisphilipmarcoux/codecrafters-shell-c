@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>    // For strcmp, strncmp, strlen, strdup, strtok
-#include <unistd.h>    // For access(), X_OK, fork(), execv()
+#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd()
 #include <sys/wait.h>  // For waitpid()
 #include <sys/types.h> // For pid_t
 
@@ -84,20 +84,38 @@ int main(int argc, char *argv[])
       return 0; // Exit the shell
     }
 
-    // 6. Check for 'echo' command
+    // 6. NEW: Check for 'pwd'
+    if (strcmp(command, "pwd") == 0)
+    {
+      char cwd_buffer[MAX_PATH_LENGTH];
+      // getcwd() fills the buffer with the current working directory
+      if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL)
+      {
+        printf("%s\n", cwd_buffer);
+      }
+      else
+      {
+        // Print an error if getcwd fails
+        perror("getcwd");
+      }
+      continue; // Command handled
+    }
+
+    // 7. Check for 'echo' command
     if (strncmp(command, "echo ", 5) == 0)
     {
       printf("%s\n", command + 5);
       continue;
     }
 
-    // 7. Check for 'type' command
+    // 8. Check for 'type' command
     if (strncmp(command, "type ", 5) == 0)
     {
       char *arg = command + 5;
 
       // Check builtins
-      if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 || strcmp(arg, "type") == 0)
+      if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
+          strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0)
       {
         printf("%s is a shell builtin\n", arg);
       }
@@ -120,53 +138,47 @@ int main(int argc, char *argv[])
     // --- External Command Execution ---
     // If it wasn't a builtin, try to execute it.
 
-    // 8. Parse the command and its arguments
+    // 9. Parse the command and its arguments
     char *args[MAX_ARGS];
     int i = 0;
-    // strtok modifies the string, which is fine now since builtins are done.
     char *token = strtok(command, " ");
 
     while (token != NULL)
     {
       args[i++] = token;
       if (i >= MAX_ARGS - 1)
-      {        // -1 to leave space for NULL
-        break; // Too many args
+      {
+        break;
       }
       token = strtok(NULL, " ");
     }
-    args[i] = NULL; // The args array must be NULL-terminated for execv
+    args[i] = NULL; // The args array must be NULL-terminated
 
     char *cmd_name = args[0];
     char full_path[MAX_PATH_LENGTH];
 
-    // 9. Find the executable
+    // 10. Find the executable
     if (find_executable(cmd_name, full_path, MAX_PATH_LENGTH))
     {
 
-      // 10. Fork, Exec, Wait
       pid_t pid = fork();
 
       if (pid == -1)
       {
-        // Fork failed
         perror("fork");
       }
       else if (pid == 0)
       {
-        // --- This is the Child Process ---
-        // execv replaces this child process with the new program
+        // Child Process
         if (execv(full_path, args) == -1)
         {
-          // execv only returns if an error occurred
           perror("execv");
-          exit(EXIT_FAILURE); // Exit child process if exec fails
+          exit(EXIT_FAILURE);
         }
       }
       else
       {
-        // --- This is the Parent Process (your shell) ---
-        // Wait for the child process to finish
+        // Parent Process
         int status;
         waitpid(pid, &status, 0);
       }
