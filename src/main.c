@@ -55,13 +55,14 @@ int find_executable(const char *command, char *full_path, size_t full_path_size)
  * Parse command line and extract redirect files if present.
  * Returns the index where redirection starts, or -1 if no redirection.
  * Updates redirect_stdout, redirect_stderr with filenames.
- * Updates append_stdout to indicate if >> is used instead of >.
+ * Updates append_stdout and append_stderr to indicate if >> is used instead of >.
  */
-int find_redirect(char **args, char **redirect_stdout, char **redirect_stderr, int *append_stdout)
+int find_redirect(char **args, char **redirect_stdout, char **redirect_stderr, int *append_stdout, int *append_stderr)
 {
   *redirect_stdout = NULL;
   *redirect_stderr = NULL;
   *append_stdout = 0;
+  *append_stderr = 0;
   int first_redirect_idx = -1;
 
   for (int i = 0; args[i] != NULL; i++)
@@ -92,6 +93,19 @@ int find_redirect(char **args, char **redirect_stdout, char **redirect_stderr, i
       if (first_redirect_idx == -1)
         first_redirect_idx = i;
     }
+    // Check for 2>> (stderr append)
+    else if (strcmp(args[i], "2>>") == 0)
+    {
+      if (args[i + 1] == NULL)
+      {
+        fprintf(stderr, "Error: No file specified for redirection\n");
+        return -2; // Error case
+      }
+      *redirect_stderr = args[i + 1];
+      *append_stderr = 1;
+      if (first_redirect_idx == -1)
+        first_redirect_idx = i;
+    }
     // Check for 2> (stderr)
     else if (strcmp(args[i], "2>") == 0)
     {
@@ -101,6 +115,7 @@ int find_redirect(char **args, char **redirect_stdout, char **redirect_stderr, i
         return -2; // Error case
       }
       *redirect_stderr = args[i + 1];
+      *append_stderr = 0;
       if (first_redirect_idx == -1)
         first_redirect_idx = i;
     }
@@ -112,7 +127,7 @@ int find_redirect(char **args, char **redirect_stdout, char **redirect_stderr, i
 /**
  * Execute echo builtin with optional output redirection.
  */
-void execute_echo(char **args, int redirect_idx, char *redirect_stdout, char *redirect_stderr, int append_stdout)
+void execute_echo(char **args, int redirect_idx, char *redirect_stdout, char *redirect_stderr, int append_stdout, int append_stderr)
 {
   FILE *output = stdout;
   FILE *error = stderr;
@@ -132,7 +147,8 @@ void execute_echo(char **args, int redirect_idx, char *redirect_stdout, char *re
   // Handle stderr redirection (echo doesn't produce stderr, but for consistency)
   if (redirect_stderr != NULL)
   {
-    error = fopen(redirect_stderr, "w");
+    const char *mode = append_stderr ? "a" : "w";
+    error = fopen(redirect_stderr, mode);
     if (error == NULL)
     {
       perror("fopen");
@@ -161,7 +177,7 @@ void execute_echo(char **args, int redirect_idx, char *redirect_stdout, char *re
 /**
  * Execute pwd builtin with optional output redirection.
  */
-void execute_pwd(char *redirect_stdout, char *redirect_stderr, int append_stdout)
+void execute_pwd(char *redirect_stdout, char *redirect_stderr, int append_stdout, int append_stderr)
 {
   char cwd_buffer[MAX_PATH_LENGTH];
   FILE *output = stdout;
@@ -180,7 +196,8 @@ void execute_pwd(char *redirect_stdout, char *redirect_stderr, int append_stdout
 
   if (redirect_stderr != NULL)
   {
-    error = fopen(redirect_stderr, "w");
+    const char *mode = append_stderr ? "a" : "w";
+    error = fopen(redirect_stderr, mode);
     if (error == NULL)
     {
       perror("fopen");
@@ -374,7 +391,8 @@ int main(int argc, char *argv[])
     char *redirect_stdout = NULL;
     char *redirect_stderr = NULL;
     int append_stdout = 0;
-    int redirect_idx = find_redirect(args, &redirect_stdout, &redirect_stderr, &append_stdout);
+    int append_stderr = 0;
+    int redirect_idx = find_redirect(args, &redirect_stdout, &redirect_stderr, &append_stdout, &append_stderr);
 
     if (redirect_idx == -2)
     {
@@ -398,14 +416,14 @@ int main(int argc, char *argv[])
     // 6. Check for 'pwd'
     if (strcmp(args[0], "pwd") == 0)
     {
-      execute_pwd(redirect_stdout, redirect_stderr, append_stdout);
+      execute_pwd(redirect_stdout, redirect_stderr, append_stdout, append_stderr);
       continue;
     }
 
     // 7. Check for 'echo'
     if (strcmp(args[0], "echo") == 0)
     {
-      execute_echo(args, redirect_idx, redirect_stdout, redirect_stderr, append_stdout);
+      execute_echo(args, redirect_idx, redirect_stdout, redirect_stderr, append_stdout, append_stderr);
       continue;
     }
 
@@ -515,7 +533,10 @@ int main(int argc, char *argv[])
         // Handle stderr redirection
         if (redirect_stderr != NULL)
         {
-          int fd = open(redirect_stderr, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          int flags = O_WRONLY | O_CREAT;
+          flags |= append_stderr ? O_APPEND : O_TRUNC;
+
+          int fd = open(redirect_stderr, flags, 0644);
           if (fd == -1)
           {
             perror("open");
