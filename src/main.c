@@ -565,7 +565,7 @@ int main(int argc, char *argv[])
           read_ptr++;
           new_arg = 0;
         }
-        else if (c == ' ')
+        else if (c == ' ' || c == '|')
         {
           if (!new_arg)
           {
@@ -581,6 +581,25 @@ int main(int argc, char *argv[])
             args[arg_index] = write_ptr;
             new_arg = 1;
           }
+
+          // If it's a pipe, add it as a separate token
+          if (c == '|')
+          {
+            *write_ptr = '|';
+            write_ptr++;
+            *write_ptr = '\0';
+            write_ptr++;
+
+            arg_index++;
+            if (arg_index >= MAX_ARGS - 1)
+            {
+              fprintf(stderr, "Error: Too many arguments\n");
+              break;
+            }
+            args[arg_index] = write_ptr;
+            new_arg = 1;
+          }
+
           read_ptr++;
         }
         else if (c == '\'')
