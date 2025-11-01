@@ -7,36 +7,8 @@
 #include <errno.h>     // For errno (used with chdir)
 #include <fcntl.h>     // For open(), O_WRONLY, O_CREAT, O_TRUNC
 #include <dirent.h>    // For opendir(), readdir(), closedir()
-/* Prefer readline; try editline as an alternative; if neither is available,
-   provide minimal prototypes so the source compiles (these are only used
-   when the real library is missing and do not implement functionality). */
-#if defined(__has_include)
-#  if __has_include(<readline/readline.h>)
-#    include <readline/readline.h>
-#    include <readline/history.h>
-#  elif __has_include(<editline/readline.h>)
-#    include <editline/readline.h>
-#    /* editline may not have a separate history header; provide add_history if missing */
-#    if __has_include(<readline/history.h>)
-#      include <readline/history.h>
-#    endif
-#  else
-/* Minimal readline/editline stubs to avoid compilation errors when headers
-   are not present; these do not provide real functionality. */
-char *readline(const char *prompt);
-void add_history(const char *line);
-/* rl_attempted_completion_function points to a function with signature
-   char **func(const char *text, int start, int end) */
-extern char **(*rl_attempted_completion_function)(const char *, int, int);
-extern int rl_completion_append_character;
-/* rl_completion_matches has a generator function type of
-   char *gen(const char *text, int state) */
-char **rl_completion_matches(const char *text, char *(*generator)(const char *, int));
-#  endif
-#else
-#  include <readline/readline.h>
-#  include <readline/history.h>
-#endif
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #define MAX_COMMAND_LENGTH 1024
 #define MAX_PATH_LENGTH 1024
