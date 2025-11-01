@@ -495,6 +495,13 @@ int main(int argc, char *argv[])
               break;
             }
           }
+          else
+          {
+            // If new_arg is true but we're at a pipe, we need to handle the empty arg case
+            // This happens with input like "cat | wc" (spaces around pipe)
+            // In this case, args[arg_index] points to an uninitialized or previous location
+            // We should NOT have an empty argument before the pipe
+          }
           // Add pipe as its own argument
           args[arg_index] = write_ptr;
           *write_ptr = '|';
@@ -507,6 +514,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "Error: Too many arguments\n");
             break;
           }
+          // Set up the next argument position
           args[arg_index] = write_ptr;
           new_arg = 1;
           read_ptr++;
@@ -615,6 +623,22 @@ int main(int argc, char *argv[])
     }
     args[arg_index] = NULL;
 
+    // Filter out empty arguments (can happen with certain parsing edge cases)
+    int read_idx = 0, write_idx = 0;
+    while (args[read_idx] != NULL)
+    {
+      if (strlen(args[read_idx]) > 0)
+      {
+        if (read_idx != write_idx)
+        {
+          args[write_idx] = args[read_idx];
+        }
+        write_idx++;
+      }
+      read_idx++;
+    }
+    args[write_idx] = NULL;
+
     if (args[0] == NULL || args[0][0] == '\0')
     {
       continue;
@@ -630,13 +654,7 @@ int main(int argc, char *argv[])
     {
       if (strcmp(args[i], "|") == 0)
       {
-        if (i == 0)
-        {
-          fprintf(stderr, "Error: Invalid pipe syntax\n");
-          pipe_idx = -2; // Mark as error
-          break;
-        }
-        if (args[i + 1] == NULL || args[i + 1][0] == '\0')
+        if (i == 0 || args[i + 1] == NULL)
         {
           fprintf(stderr, "Error: Invalid pipe syntax\n");
           pipe_idx = -2; // Mark as error
