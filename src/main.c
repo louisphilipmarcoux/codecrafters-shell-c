@@ -419,6 +419,7 @@ int main(int argc, char *argv[])
 {
   // Flush after every printf
   setbuf(stdout, NULL);
+  setbuf(stderr, NULL);
 
   // Initialize readline
   init_readline();
@@ -607,32 +608,14 @@ int main(int argc, char *argv[])
 
     *write_ptr = '\0'; // Terminate the last token
 
-    if (new_arg)
+    if (!new_arg)
     {
-      // We ended on a separator (space or pipe)
-      if (arg_index == 0 && *args[0] == '\0')
-      {
-        // Special case: input was just whitespace
-        args[0] = NULL;
-      }
-      else
-      {
-        // We ended with "cat | " or "cat file |"
-        // The last arg pointer (e.g., args[3]) points to an empty string.
-        // We must set this to NULL.
-        args[arg_index] = NULL;
-      }
-    }
-    else
-    {
-      // We ended in the middle of an argument (e.g., "wc")
-      // This argument is valid, so we increment arg_index
-      // and set the *next* pointer to NULL.
+      // We ended in the middle of an argument
       arg_index++;
-      args[arg_index] = NULL;
     }
+    args[arg_index] = NULL;
 
-    if (args[0] == NULL)
+    if (args[0] == NULL || args[0][0] == '\0')
     {
       continue;
     }
@@ -647,7 +630,13 @@ int main(int argc, char *argv[])
     {
       if (strcmp(args[i], "|") == 0)
       {
-        if (i == 0 || args[i + 1] == NULL)
+        if (i == 0)
+        {
+          fprintf(stderr, "Error: Invalid pipe syntax\n");
+          pipe_idx = -2; // Mark as error
+          break;
+        }
+        if (args[i + 1] == NULL || args[i + 1][0] == '\0')
         {
           fprintf(stderr, "Error: Invalid pipe syntax\n");
           pipe_idx = -2; // Mark as error
