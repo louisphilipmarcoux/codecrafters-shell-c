@@ -177,7 +177,7 @@ char *path_generator(const char *text, int state)
     while ((entry = readdir(dir_handle)) != NULL)
     {
       // Skip .
-      and..if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
       // Check if entry matches the text
       if (strncmp(entry->d_name, text, text_len) == 0)
       {
