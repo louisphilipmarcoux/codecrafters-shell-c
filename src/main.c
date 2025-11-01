@@ -362,6 +362,16 @@ int find_redirect(char **args, char **redirect_stdout, char **redirect_stderr, i
 }
 
 /**
+ * Check if a command is a built-in.
+ */
+int is_builtin(const char *cmd)
+{
+  return (strcmp(cmd, "echo") == 0 || strcmp(cmd, "exit") == 0 ||
+          strcmp(cmd, "type") == 0 || strcmp(cmd, "pwd") == 0 ||
+          strcmp(cmd, "cd") == 0);
+}
+
+/**
  * Execute echo builtin with optional output redirection.
  */
 void execute_echo(char **args, int redirect_idx, char *redirect_stdout, char *redirect_stderr, int append_stdout, int append_stderr)
@@ -409,6 +419,37 @@ void execute_echo(char **args, int redirect_idx, char *redirect_stdout, char *re
     fclose(output);
   if (error != stderr)
     fclose(error);
+}
+
+/**
+ * Execute type builtin.
+ */
+void execute_type(char **args)
+{
+  if (args[1] == NULL)
+  {
+    fprintf(stderr, "type: missing argument\n");
+    return;
+  }
+
+  char *arg = args[1];
+
+  if (is_builtin(arg))
+  {
+    printf("%s is a shell builtin\n", arg);
+  }
+  else
+  {
+    char full_path[MAX_PATH_LENGTH];
+    if (find_executable(arg, full_path, MAX_PATH_LENGTH))
+    {
+      printf("%s is %s\n", arg, full_path);
+    }
+    else
+    {
+      printf("%s: not found\n", arg);
+    }
+  }
 }
 
 /**
@@ -707,32 +748,7 @@ int main(int argc, char *argv[])
     // 9. Check for 'type'
     if (strcmp(args[0], "type") == 0)
     {
-      if (args[1] == NULL)
-      {
-        fprintf(stderr, "type: missing argument\n");
-        continue;
-      }
-
-      char *arg = args[1];
-
-      if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
-          strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
-          strcmp(arg, "cd") == 0)
-      {
-        printf("%s is a shell builtin\n", arg);
-      }
-      else
-      {
-        char full_path[MAX_PATH_LENGTH];
-        if (find_executable(arg, full_path, MAX_PATH_LENGTH))
-        {
-          printf("%s is %s\n", arg, full_path);
-        }
-        else
-        {
-          printf("%s: not found\n", arg);
-        }
-      }
+      execute_type(args);
       continue;
     }
 
@@ -760,17 +776,21 @@ int main(int argc, char *argv[])
       }
       cmd2_args[j] = NULL;
 
-      // Find executables for both commands
+      // Check if commands are builtins or external
+      int cmd1_is_builtin = is_builtin(cmd1_args[0]);
+      int cmd2_is_builtin = is_builtin(cmd2_args[0]);
+
+      // Find executables for external commands
       char full_path1[MAX_PATH_LENGTH];
       char full_path2[MAX_PATH_LENGTH];
 
-      if (!find_executable(cmd1_args[0], full_path1, MAX_PATH_LENGTH))
+      if (!cmd1_is_builtin && !find_executable(cmd1_args[0], full_path1, MAX_PATH_LENGTH))
       {
         fprintf(stderr, "%s: command not found\n", cmd1_args[0]);
         continue;
       }
 
-      if (!find_executable(cmd2_args[0], full_path2, MAX_PATH_LENGTH))
+      if (!cmd2_is_builtin && !find_executable(cmd2_args[0], full_path2, MAX_PATH_LENGTH))
       {
         fprintf(stderr, "%s: command not found\n", cmd2_args[0]);
         continue;
@@ -809,11 +829,30 @@ int main(int argc, char *argv[])
 
         close(pipefd[1]);
 
-        // Execute first command
-        if (execv(full_path1, cmd1_args) == -1)
+        // Execute first command (builtin or external)
+        if (cmd1_is_builtin)
         {
-          perror("execv");
-          exit(EXIT_FAILURE);
+          if (strcmp(cmd1_args[0], "echo") == 0)
+          {
+            execute_echo(cmd1_args, -1, NULL, NULL, 0, 0);
+          }
+          else if (strcmp(cmd1_args[0], "pwd") == 0)
+          {
+            execute_pwd(NULL, NULL, 0, 0);
+          }
+          else if (strcmp(cmd1_args[0], "type") == 0)
+          {
+            execute_type(cmd1_args);
+          }
+          exit(EXIT_SUCCESS);
+        }
+        else
+        {
+          if (execv(full_path1, cmd1_args) == -1)
+          {
+            perror("execv");
+            exit(EXIT_FAILURE);
+          }
         }
       }
 
@@ -843,11 +882,30 @@ int main(int argc, char *argv[])
 
         close(pipefd[0]);
 
-        // Execute second command
-        if (execv(full_path2, cmd2_args) == -1)
+        // Execute second command (builtin or external)
+        if (cmd2_is_builtin)
         {
-          perror("execv");
-          exit(EXIT_FAILURE);
+          if (strcmp(cmd2_args[0], "echo") == 0)
+          {
+            execute_echo(cmd2_args, -1, NULL, NULL, 0, 0);
+          }
+          else if (strcmp(cmd2_args[0], "pwd") == 0)
+          {
+            execute_pwd(NULL, NULL, 0, 0);
+          }
+          else if (strcmp(cmd2_args[0], "type") == 0)
+          {
+            execute_type(cmd2_args);
+          }
+          exit(EXIT_SUCCESS);
+        }
+        else
+        {
+          if (execv(full_path2, cmd2_args) == -1)
+          {
+            perror("execv");
+            exit(EXIT_FAILURE);
+          }
         }
       }
 
