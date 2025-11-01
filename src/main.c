@@ -673,7 +673,17 @@ int main(int argc, char *argv[])
       continue;
     }
 
-    // --- Check for output redirection ---
+    // --- Check for Pipeline FIRST ---
+    int pipe_idx = find_pipe(args);
+
+    // If there's a pipe, handle pipeline execution
+    if (pipe_idx > 0)
+    {
+      // Pipeline handling code will go here
+      // (we'll move it up in the next update)
+    }
+
+    // --- No pipeline, check for output redirection ---
     char *redirect_stdout = NULL;
     char *redirect_stderr = NULL;
     int append_stdout = 0;
@@ -751,9 +761,6 @@ int main(int argc, char *argv[])
       execute_type(args);
       continue;
     }
-
-    // --- Check for Pipeline ---
-    int pipe_idx = find_pipe(args);
 
     if (pipe_idx > 0)
     {
