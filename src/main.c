@@ -605,13 +605,32 @@ int main(int argc, char *argv[])
       continue;
     }
 
-    *write_ptr = '\0';
+    *write_ptr = '\0'; // Terminate the last token
 
-    if (!new_arg)
+    if (new_arg)
     {
-      arg_index++;
+      // We ended on a separator (space or pipe)
+      if (arg_index == 0 && *args[0] == '\0')
+      {
+        // Special case: input was just whitespace
+        args[0] = NULL;
+      }
+      else
+      {
+        // We ended with "cat | " or "cat file |"
+        // The last arg pointer (e.g., args[3]) points to an empty string.
+        // We must set this to NULL.
+        args[arg_index] = NULL;
+      }
     }
-    args[arg_index] = NULL;
+    else
+    {
+      // We ended in the middle of an argument (e.g., "wc")
+      // This argument is valid, so we increment arg_index
+      // and set the *next* pointer to NULL.
+      arg_index++;
+      args[arg_index] = NULL;
+    }
 
     if (args[0] == NULL)
     {
@@ -675,6 +694,7 @@ int main(int argc, char *argv[])
     {
       // --- Pipeline Execution (cmd1 | cmd2) ---
       //
+
       int pipefd[2];
       if (pipe(pipefd) == -1)
       {
