@@ -1,14 +1,42 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>    // For strcmp, strncmp, strlen, strdup, strtok, strerror
-#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir(), pipe(), dup2(), close()
+#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir(), pipe()
 #include <sys/wait.h>  // For waitpid()
 #include <sys/types.h> // For pid_t
 #include <errno.h>     // For errno (used with chdir)
-#include <fcntl.h>     // For open(), O_WRONLY, O_CREAT, O_TRUNC, O_APPEND
+#include <fcntl.h>     // For open(), O_WRONLY, O_CREAT, O_TRUNC
 #include <dirent.h>    // For opendir(), readdir(), closedir()
+/* Prefer readline; try editline as an alternative; if neither is available,
+   provide minimal prototypes so the source compiles (these are only used
+   when the real library is missing and do not implement functionality). */
+#if defined(__has_include)
+#if __has_include(<readline/readline.h>)
 #include <readline/readline.h>
 #include <readline/history.h>
+#elif __has_include(<editline/readline.h>)
+#include <editline/readline.h>
+#/* editline may not have a separate history header; provide add_history if missing */
+#if __has_include(<readline/history.h>)
+#include <readline/history.h>
+#endif
+#else
+/* Minimal readline/editline stubs to avoid compilation errors when headers
+   are not present; these do not provide real functionality. */
+char *readline(const char *prompt);
+void add_history(const char *line);
+/* rl_attempted_completion_function points to a function with signature
+   char **func(const char *text, int start, int end) */
+extern char **(*rl_attempted_completion_function)(const char *, int, int);
+extern int rl_completion_append_character;
+/* rl_completion_matches has a generator function type of
+   char *gen(const char *text, int state) */
+char **rl_completion_matches(const char *text, char *(*generator)(const char *, int));
+#endif
+#else
+#include <readline/readline.h>
+#include <readline/history.h>
+#endif
 
 #define MAX_COMMAND_LENGTH 1024
 #define MAX_PATH_LENGTH 1024
@@ -245,6 +273,22 @@ void init_readline(void)
 }
 
 /**
+ * Find the position of the pipe operator in args.
+ * Returns the index of "|", or -1 if not found.
+ */
+int find_pipe(char **args)
+{
+  for (int i = 0; args[i] != NULL; i++)
+  {
+    if (strcmp(args[i], "|") == 0)
+    {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
  * Parse command line and extract redirect files if present.
  * Returns the index where redirection starts, or -1 if no redirection.
  * Updates redirect_stdout, redirect_stderr with filenames.
@@ -419,7 +463,6 @@ int main(int argc, char *argv[])
 {
   // Flush after every printf
   setbuf(stdout, NULL);
-  setbuf(stderr, NULL);
 
   // Initialize readline
   init_readline();
@@ -480,44 +523,6 @@ int main(int argc, char *argv[])
           write_ptr++;
           read_ptr++;
           new_arg = 0;
-        }
-        else if (c == '|')
-        {
-          // Pipe operator - treat as separate token
-          if (!new_arg)
-          {
-            *write_ptr = '\0';
-            write_ptr++;
-            arg_index++;
-            if (arg_index >= MAX_ARGS - 1)
-            {
-              fprintf(stderr, "Error: Too many arguments\n");
-              break;
-            }
-          }
-          else
-          {
-            // If new_arg is true but we're at a pipe, we need to handle the empty arg case
-            // This happens with input like "cat | wc" (spaces around pipe)
-            // In this case, args[arg_index] points to an uninitialized or previous location
-            // We should NOT have an empty argument before the pipe
-          }
-          // Add pipe as its own argument
-          args[arg_index] = write_ptr;
-          *write_ptr = '|';
-          write_ptr++;
-          *write_ptr = '\0';
-          write_ptr++;
-          arg_index++;
-          if (arg_index >= MAX_ARGS - 1)
-          {
-            fprintf(stderr, "Error: Too many arguments\n");
-            break;
-          }
-          // Set up the next argument position
-          args[arg_index] = write_ptr;
-          new_arg = 1;
-          read_ptr++;
         }
         else if (c == ' ')
         {
@@ -614,76 +619,25 @@ int main(int argc, char *argv[])
       continue;
     }
 
-    *write_ptr = '\0'; // Terminate the last token
+    *write_ptr = '\0';
 
     if (!new_arg)
     {
-      // We ended in the middle of an argument
       arg_index++;
     }
     args[arg_index] = NULL;
 
-    // Filter out empty arguments (can happen with certain parsing edge cases)
-    int read_idx = 0, write_idx = 0;
-    while (args[read_idx] != NULL)
-    {
-      if (strlen(args[read_idx]) > 0)
-      {
-        if (read_idx != write_idx)
-        {
-          args[write_idx] = args[read_idx];
-        }
-        write_idx++;
-      }
-      read_idx++;
-    }
-    args[write_idx] = NULL;
-
-    if (args[0] == NULL || args[0][0] == '\0')
+    if (args[0] == NULL)
     {
       continue;
     }
 
-    // --- Check for pipeline ---
-    char **args_cmd1 = args;
-    char **args_cmd2 = NULL;
-    int pipe_idx = -1;
-    pid_t pid1 = -1, pid2 = -1;
-
-    for (int i = 0; args[i] != NULL; i++)
-    {
-      if (strcmp(args[i], "|") == 0)
-      {
-        if (i == 0 || args[i + 1] == NULL)
-        {
-          fprintf(stderr, "Error: Invalid pipe syntax\n");
-          pipe_idx = -2; // Mark as error
-          break;
-        }
-        pipe_idx = i;
-        args[i] = NULL;           // Terminate cmd1
-        args_cmd2 = &args[i + 1]; // Set cmd2 to start after "|"
-        break;                    // Only handle one pipe (two commands)
-      }
-    }
-
-    if (pipe_idx == -2)
-    {
-      continue; // Invalid pipe syntax
-    }
-
     // --- Check for output redirection ---
-    // This applies to the *last* command in the sequence
     char *redirect_stdout = NULL;
     char *redirect_stderr = NULL;
     int append_stdout = 0;
     int append_stderr = 0;
-    int redirect_idx = -1;
-
-    // Determine which command to check for redirection
-    char **cmd_to_redirect = (pipe_idx != -1) ? args_cmd2 : args_cmd1;
-
-    redirect_idx = find_redirect(cmd_to_redirect, &redirect_stdout, &redirect_stderr, &append_stdout, &append_stderr);
+    int redirect_idx = find_redirect(args, &redirect_stdout, &redirect_stderr, &append_stdout, &append_stderr);
 
     if (redirect_idx == -2)
     {
@@ -693,15 +647,136 @@ int main(int argc, char *argv[])
     // Null-terminate args at first redirect operator
     if (redirect_idx >= 0)
     {
-      cmd_to_redirect[redirect_idx] = NULL;
+      args[redirect_idx] = NULL;
     }
 
-    // --- Execution ---
-    if (pipe_idx != -1)
-    {
-      // --- Pipeline Execution (cmd1 | cmd2) ---
-      //
+    // --- Builtin Command Handling ---
 
+    // 5. Check for 'exit 0'
+    if (strcmp(args[0], "exit") == 0)
+    {
+      return 0;
+    }
+
+    // 6. Check for 'pwd'
+    if (strcmp(args[0], "pwd") == 0)
+    {
+      execute_pwd(redirect_stdout, redirect_stderr, append_stdout, append_stderr);
+      continue;
+    }
+
+    // 7. Check for 'echo'
+    if (strcmp(args[0], "echo") == 0)
+    {
+      execute_echo(args, redirect_idx, redirect_stdout, redirect_stderr, append_stdout, append_stderr);
+      continue;
+    }
+
+    // 8. Check for 'cd'
+    if (strcmp(args[0], "cd") == 0)
+    {
+      if (args[1] == NULL)
+      {
+        fprintf(stderr, "cd: missing argument\n");
+        continue;
+      }
+
+      char *path_to_change = NULL;
+
+      if (strcmp(args[1], "~") == 0)
+      {
+        path_to_change = getenv("HOME");
+        if (path_to_change == NULL)
+        {
+          fprintf(stderr, "cd: HOME not set\n");
+          continue;
+        }
+      }
+      else
+      {
+        path_to_change = args[1];
+      }
+
+      if (chdir(path_to_change) != 0)
+      {
+        fprintf(stderr, "cd: %s: %s\n", args[1], strerror(errno));
+      }
+      continue;
+    }
+
+    // 9. Check for 'type'
+    if (strcmp(args[0], "type") == 0)
+    {
+      if (args[1] == NULL)
+      {
+        fprintf(stderr, "type: missing argument\n");
+        continue;
+      }
+
+      char *arg = args[1];
+
+      if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
+          strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
+          strcmp(arg, "cd") == 0)
+      {
+        printf("%s is a shell builtin\n", arg);
+      }
+      else
+      {
+        char full_path[MAX_PATH_LENGTH];
+        if (find_executable(arg, full_path, MAX_PATH_LENGTH))
+        {
+          printf("%s is %s\n", arg, full_path);
+        }
+        else
+        {
+          printf("%s: not found\n", arg);
+        }
+      }
+      continue;
+    }
+
+    // --- Check for Pipeline ---
+    int pipe_idx = find_pipe(args);
+
+    if (pipe_idx > 0)
+    {
+      // Split the command into two parts at the pipe
+      char *cmd1_args[MAX_ARGS];
+      char *cmd2_args[MAX_ARGS];
+
+      // Copy first command arguments
+      for (int i = 0; i < pipe_idx; i++)
+      {
+        cmd1_args[i] = args[i];
+      }
+      cmd1_args[pipe_idx] = NULL;
+
+      // Copy second command arguments
+      int j = 0;
+      for (int i = pipe_idx + 1; args[i] != NULL; i++)
+      {
+        cmd2_args[j++] = args[i];
+      }
+      cmd2_args[j] = NULL;
+
+      // Find executables for both commands
+      char full_path1[MAX_PATH_LENGTH];
+      char full_path2[MAX_PATH_LENGTH];
+
+      if (!find_executable(cmd1_args[0], full_path1, MAX_PATH_LENGTH))
+      {
+        fprintf(stderr, "%s: command not found\n", cmd1_args[0]);
+        continue;
+      }
+
+      if (!find_executable(cmd2_args[0], full_path2, MAX_PATH_LENGTH))
+      {
+        fprintf(stderr, "%s: command not found\n", cmd2_args[0]);
+        continue;
+      }
+
+      // Create pipe
       int pipefd[2];
       if (pipe(pipefd) == -1)
       {
@@ -709,304 +784,161 @@ int main(int argc, char *argv[])
         continue;
       }
 
-      // Fork for Command 1
-      pid1 = fork();
+      // Fork first child for first command
+      pid_t pid1 = fork();
+
       if (pid1 == -1)
       {
-        perror("fork (pid1)");
+        perror("fork");
         close(pipefd[0]);
         close(pipefd[1]);
         continue;
       }
-
-      if (pid1 == 0)
+      else if (pid1 == 0)
       {
-        // --- Child 1 (cmd1) ---
-        close(pipefd[0]); // Close unused read end
+        // First child: execute first command
+        // Close read end of pipe
+        close(pipefd[0]);
 
-        // Redirect stdout to the pipe's write end
+        // Redirect stdout to pipe write end
         if (dup2(pipefd[1], STDOUT_FILENO) == -1)
         {
-          perror("dup2 (cmd1)");
+          perror("dup2");
           exit(EXIT_FAILURE);
         }
-        close(pipefd[1]); // Close original write end
 
-        // Find and exec cmd1
-        char full_path_cmd1[MAX_PATH_LENGTH];
-        if (find_executable(args_cmd1[0], full_path_cmd1, MAX_PATH_LENGTH))
+        close(pipefd[1]);
+
+        // Execute first command
+        if (execv(full_path1, cmd1_args) == -1)
         {
-          if (execv(full_path_cmd1, args_cmd1) == -1)
-          {
-            perror("execv (cmd1)");
-            exit(EXIT_FAILURE);
-          }
-        }
-        else
-        {
-          fprintf(stderr, "%s: command not found\n", args_cmd1[0]);
+          perror("execv");
           exit(EXIT_FAILURE);
         }
       }
 
-      // Fork for Command 2
-      pid2 = fork();
+      // Fork second child for second command
+      pid_t pid2 = fork();
+
       if (pid2 == -1)
       {
-        perror("fork (pid2)");
+        perror("fork");
         close(pipefd[0]);
         close(pipefd[1]);
-        waitpid(pid1, NULL, 0); // Clean up first child
+        waitpid(pid1, NULL, 0);
         continue;
       }
-
-      if (pid2 == 0)
+      else if (pid2 == 0)
       {
-        // --- Child 2 (cmd2) ---
-        close(pipefd[1]); // Close unused write end
+        // Second child: execute second command
+        // Close write end of pipe
+        close(pipefd[1]);
 
-        // Redirect stdin from the pipe's read end
+        // Redirect stdin to pipe read end
         if (dup2(pipefd[0], STDIN_FILENO) == -1)
         {
-          perror("dup2 (cmd2)");
+          perror("dup2");
           exit(EXIT_FAILURE);
         }
-        close(pipefd[0]); // Close original read end
 
-        // Handle output redirection for cmd2
+        close(pipefd[0]);
+
+        // Execute second command
+        if (execv(full_path2, cmd2_args) == -1)
+        {
+          perror("execv");
+          exit(EXIT_FAILURE);
+        }
+      }
+
+      // Parent: close both ends of pipe and wait for both children
+      close(pipefd[0]);
+      close(pipefd[1]);
+
+      waitpid(pid1, NULL, 0);
+      waitpid(pid2, NULL, 0);
+
+      continue;
+    }
+
+    // --- External Command Execution (No Pipeline) ---
+    char *cmd_name = args[0];
+    char full_path[MAX_PATH_LENGTH];
+
+    if (find_executable(cmd_name, full_path, MAX_PATH_LENGTH))
+    {
+      pid_t pid = fork();
+
+      if (pid == -1)
+      {
+        perror("fork");
+      }
+      else if (pid == 0)
+      {
+        // Child Process
+
+        // Handle stdout redirection
         if (redirect_stdout != NULL)
         {
           int flags = O_WRONLY | O_CREAT;
           flags |= append_stdout ? O_APPEND : O_TRUNC;
+
           int fd = open(redirect_stdout, flags, 0644);
           if (fd == -1)
           {
-            perror("open (stdout)");
+            perror("open");
             exit(EXIT_FAILURE);
           }
+
           if (dup2(fd, STDOUT_FILENO) == -1)
           {
-            perror("dup2 (stdout)");
+            perror("dup2");
             close(fd);
             exit(EXIT_FAILURE);
           }
+
           close(fd);
         }
+
+        // Handle stderr redirection
         if (redirect_stderr != NULL)
         {
           int flags = O_WRONLY | O_CREAT;
           flags |= append_stderr ? O_APPEND : O_TRUNC;
+
           int fd = open(redirect_stderr, flags, 0644);
           if (fd == -1)
           {
-            perror("open (stderr)");
+            perror("open");
             exit(EXIT_FAILURE);
           }
+
           if (dup2(fd, STDERR_FILENO) == -1)
           {
-            perror("dup2 (stderr)");
+            perror("dup2");
             close(fd);
             exit(EXIT_FAILURE);
           }
+
           close(fd);
         }
 
-        // Find and exec cmd2
-        char full_path_cmd2[MAX_PATH_LENGTH];
-        if (find_executable(args_cmd2[0], full_path_cmd2, MAX_PATH_LENGTH))
+        if (execv(full_path, args) == -1)
         {
-          if (execv(full_path_cmd2, args_cmd2) == -1)
-          {
-            perror("execv (cmd2)");
-            exit(EXIT_FAILURE);
-          }
-        }
-        else
-        {
-          fprintf(stderr, "%s: command not found\n", args_cmd2[0]);
+          perror("execv");
           exit(EXIT_FAILURE);
-        }
-      }
-
-      // --- Parent (Shell) ---
-      // Close both ends of the pipe in the parent
-      // This is crucial for EOF to be sent to cmd2 when cmd1 finishes
-      close(pipefd[0]);
-      close(pipefd[1]);
-
-      // Wait for both children to complete
-      waitpid(pid1, NULL, 0);
-      waitpid(pid2, NULL, 0);
-    }
-    else
-    {
-      // --- Single Command Execution (No Pipe) ---
-
-      // --- Builtin Command Handling ---
-
-      // 5. Check for 'exit 0'
-      if (strcmp(args_cmd1[0], "exit") == 0)
-      {
-        return 0;
-      }
-
-      // 6. Check for 'pwd'
-      if (strcmp(args_cmd1[0], "pwd") == 0)
-      {
-        execute_pwd(redirect_stdout, redirect_stderr, append_stdout, append_stderr);
-        continue;
-      }
-
-      // 7. Check for 'echo'
-      if (strcmp(args_cmd1[0], "echo") == 0)
-      {
-        execute_echo(args_cmd1, redirect_idx, redirect_stdout, redirect_stderr, append_stdout, append_stderr);
-        continue;
-      }
-
-      // 8. Check for 'cd'
-      if (strcmp(args_cmd1[0], "cd") == 0)
-      {
-        if (args_cmd1[1] == NULL)
-        {
-          fprintf(stderr, "cd: missing argument\n");
-          continue;
-        }
-
-        char *path_to_change = NULL;
-
-        if (strcmp(args_cmd1[1], "~") == 0)
-        {
-          path_to_change = getenv("HOME");
-          if (path_to_change == NULL)
-          {
-            fprintf(stderr, "cd: HOME not set\n");
-            continue;
-          }
-        }
-        else
-        {
-          path_to_change = args_cmd1[1];
-        }
-
-        if (chdir(path_to_change) != 0)
-        {
-          fprintf(stderr, "cd: %s: %s\n", args_cmd1[1], strerror(errno));
-        }
-        continue;
-      }
-
-      // 9. Check for 'type'
-      if (strcmp(args_cmd1[0], "type") == 0)
-      {
-        if (args_cmd1[1] == NULL)
-        {
-          fprintf(stderr, "type: missing argument\n");
-          continue;
-        }
-
-        char *arg = args_cmd1[1];
-
-        if (strcmp(arg, "echo") == 0 || strcmp(arg, "exit") == 0 ||
-            strcmp(arg, "type") == 0 || strcmp(arg, "pwd") == 0 ||
-            strcmp(arg, "cd") == 0)
-        {
-          printf("%s is a shell builtin\n", arg);
-        }
-        else
-        {
-          char full_path[MAX_PATH_LENGTH];
-          if (find_executable(arg, full_path, MAX_PATH_LENGTH))
-          {
-            printf("%s is %s\n", arg, full_path);
-          }
-          else
-          {
-            printf("%s: not found\n", arg);
-          }
-        }
-        continue;
-      }
-
-      // --- External Command Execution ---
-      char *cmd_name = args_cmd1[0];
-      char full_path[MAX_PATH_LENGTH];
-
-      if (find_executable(cmd_name, full_path, MAX_PATH_LENGTH))
-      {
-        pid_t pid = fork();
-
-        if (pid == -1)
-        {
-          perror("fork");
-        }
-        else if (pid == 0)
-        {
-          // Child Process
-
-          // Handle stdout redirection
-          if (redirect_stdout != NULL)
-          {
-            int flags = O_WRONLY | O_CREAT;
-            flags |= append_stdout ? O_APPEND : O_TRUNC;
-
-            int fd = open(redirect_stdout, flags, 0644);
-            if (fd == -1)
-            {
-              perror("open");
-              exit(EXIT_FAILURE);
-            }
-
-            if (dup2(fd, STDOUT_FILENO) == -1)
-            {
-              perror("dup2");
-              close(fd);
-              exit(EXIT_FAILURE);
-            }
-
-            close(fd);
-          }
-
-          // Handle stderr redirection
-          if (redirect_stderr != NULL)
-          {
-            int flags = O_WRONLY | O_CREAT;
-            flags |= append_stderr ? O_APPEND : O_TRUNC;
-
-            int fd = open(redirect_stderr, flags, 0644);
-            if (fd == -1)
-            {
-              perror("open");
-              exit(EXIT_FAILURE);
-            }
-
-            if (dup2(fd, STDERR_FILENO) == -1)
-            {
-              perror("dup2");
-              close(fd);
-              exit(EXIT_FAILURE);
-            }
-
-            close(fd);
-          }
-
-          if (execv(full_path, args_cmd1) == -1)
-          {
-            perror("execv");
-            exit(EXIT_FAILURE);
-          }
-        }
-        else
-        {
-          // Parent Process
-          int status;
-          waitpid(pid, &status, 0);
         }
       }
       else
       {
-        fprintf(stderr, "%s: command not found\n", cmd_name);
+        // Parent Process
+        int status;
+        waitpid(pid, &status, 0);
       }
+    }
+    else
+    {
+      fprintf(stderr, "%s: command not found\n", cmd_name);
     }
   }
 
