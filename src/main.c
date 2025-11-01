@@ -54,6 +54,68 @@ int find_executable(const char *command, char *full_path, size_t full_path_size)
 }
 
 /**
+ * Readline completion generator for builtin commands.
+ * This function is called repeatedly to generate matches.
+ */
+char *builtin_generator(const char *text, int state)
+{
+  static const char *builtins[] = {
+      "echo", "exit", "type", "pwd", "cd", NULL};
+  static int list_index, len;
+
+  // Initialize on first call (state == 0)
+  if (!state)
+  {
+    list_index = 0;
+    len = strlen(text);
+  }
+
+  // Find next matching builtin
+  while (builtins[list_index])
+  {
+    const char *name = builtins[list_index];
+    list_index++;
+
+    if (strncmp(name, text, len) == 0)
+    {
+      return strdup(name);
+    }
+  }
+
+  return NULL;
+}
+
+/**
+ * Readline completion function.
+ * Attempts to complete builtin commands.
+ */
+char **shell_completion(const char *text, int start, int end)
+{
+  char **matches = NULL;
+
+  // Only complete if we're at the start of the line (completing command name)
+  if (start == 0)
+  {
+    matches = rl_completion_matches(text, builtin_generator);
+  }
+
+  // Return matches or NULL - this prevents default filename completion
+  return matches;
+}
+
+/**
+ * Initialize readline with custom completion.
+ */
+void init_readline(void)
+{
+  // Set custom completion function
+  rl_attempted_completion_function = shell_completion;
+
+  // Append a space after successful completion
+  rl_completion_append_character = ' ';
+}
+
+/**
  * Parse command line and extract redirect files if present.
  * Returns the index where redirection starts, or -1 if no redirection.
  * Updates redirect_stdout, redirect_stderr with filenames.
@@ -229,30 +291,38 @@ int main(int argc, char *argv[])
   // Flush after every printf
   setbuf(stdout, NULL);
 
+  // Initialize readline
+  init_readline();
+
   while (1)
   {
-    // 1. Print the prompt
-    printf("$ ");
+    // 1. Read the user's input using readline
+    char *input = readline("$ ");
 
-    // 2. Read the user's input (command)
-    char command[MAX_COMMAND_LENGTH];
-    if (fgets(command, MAX_COMMAND_LENGTH, stdin) == NULL)
+    // Check for EOF (Ctrl+D)
+    if (input == NULL)
     {
-      break; // End of file (Ctrl+D)
+      printf("\n");
+      break;
     }
 
-    // 3. Clean up the input (remove the newline character)
-    size_t len = strlen(command);
-    if (len > 0 && command[len - 1] == '\n')
+    // 2. Handle empty input
+    if (strlen(input) == 0)
     {
-      command[len - 1] = '\0';
-    }
-
-    // 4. Handle empty input
-    if (strlen(command) == 0)
-    {
+      free(input);
       continue;
     }
+
+    // Add to history
+    add_history(input);
+
+    // Copy input to command buffer for processing
+    char command[MAX_COMMAND_LENGTH];
+    strncpy(command, input, MAX_COMMAND_LENGTH - 1);
+    command[MAX_COMMAND_LENGTH - 1] = '\0';
+
+    // Free the readline buffer
+    free(input);
 
     // --- Parse command with quote handling ---
     char *args[MAX_ARGS];
