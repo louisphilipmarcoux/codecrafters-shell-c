@@ -1,1052 +1,751 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>    // For strcmp, strncmp, strlen, strdup, strtok, strerror
-#include <unistd.h>    // For access(), X_OK, fork(), execv(), getcwd(), chdir(), pipe()
-#include <sys/wait.h>  // For waitpid()
-#include <sys/types.h> // For pid_t
-#include <errno.h>     // For errno (used with chdir)
-#include <fcntl.h>     // For open(), O_WRONLY, O_CREAT, O_TRUNC
-#include <dirent.h>    // For opendir(), readdir(), closedir()
-/* Prefer readline;
-try editline as an alternative; if neither is available,
-   provide minimal prototypes so the source compiles (these are only used
-   when the real library is missing and do not implement functionality).
-*/
-#if defined(__has_include)
-#if __has_include(<readline/readline.h>)
+#include <stdbool.h>
+#include <ctype.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <limits.h>
+#include <dirent.h>
+
+#define ENABLE_READLINE
+
+#ifdef ENABLE_READLINE
 #include <readline/readline.h>
 #include <readline/history.h>
-#elif __has_include(<editline/readline.h>)
-#include <editline/readline.h>
-#/* editline may not have a separate history header;
-provide add_history if missing */
-#if __has_include(<readline/history.h>)
-#include <readline/history.h>
-#endif
 #else
-/* Minimal readline/editline stubs to avoid compilation errors when headers
-   are not present;
-these do not provide real functionality. */
-char *readline(const char *prompt);
-void add_history(const char *line);
-/* rl_attempted_completion_function points to a function with signature
-   char **func(const char *text, int start, int end) */
-extern char **(*rl_attempted_completion_function)(const char *, int, int);
-extern int rl_completion_append_character;
-/* rl_completion_matches has a generator function type of
-   char *gen(const char *text, int state) */
-char **rl_completion_matches(const char *text, char *(*generator)(const char *, int));
-#endif
-#else
-#include <readline/readline.h>
-#include <readline/history.h>
-#endif
 
-#define MAX_COMMAND_LENGTH 1024
-#define MAX_PATH_LENGTH 1024
-#define MAX_ARGS 64 // Max number of arguments for a command
+// dummy definitions for debugging
 
-// Define parser states
-enum
+typedef struct
 {
-  STATE_DEFAULT,
-  STATE_IN_QUOTE, // Single quote
-  STATE_IN_DQUOTE // Double quote
-};
-/**
- * Helper function to find an executable in PATH.
- */
-int find_executable(const char *command, char *full_path, size_t full_path_size)
+  char *line;
+} HIST_ENTRY;
+
+HIST_ENTRY **history_list() { return NULL; }
+void using_history() {}
+void clear_history() {}
+void add_history(char *s) {}
+
+void *rl_completion_entry_function;
+
+char *readline(char *prompt)
 {
-  char *path_env = getenv("PATH");
-  if (path_env == NULL)
-    return 0;
-
-  char *path_copy = strdup(path_env);
-  if (path_copy == NULL)
-  {
-    perror("strdup");
-    return 0;
-  }
-
-  char *dir = strtok(path_copy, ":");
-  while (dir != NULL)
-  {
-    snprintf(full_path, full_path_size, "%s/%s", dir, command);
-    if (access(full_path, X_OK) == 0)
-    {
-      free(path_copy);
-      return 1;
-      // Found
-    }
-    dir = strtok(NULL, ":");
-  }
-
-  free(path_copy);
-  return 0;
-  // Not found
+  printf("%s", prompt);
+  size_t len;
+  char *response = NULL;
+  getline(&response, &len, stdin);
+  return response;
 }
 
-/**
- * Readline completion generator for builtin commands.
- * This function is called repeatedly to generate matches.
- */
-char *builtin_generator(const char *text, int state)
+#endif
+
+#define ARRAY_LENGTH(array) (sizeof(array) / sizeof(array[0]))
+#define MAX_PATH_LENGTH 1024
+#define MAX_CMD_INPUT 1024
+
+bool exitShell = false;
+
+char *builtins[] = {
+    "exit",
+    "echo",
+    "type",
+    "pwd",
+    "cd",
+    "history",
+};
+
+char *pathLookup(char *name)
 {
-  static const char *builtins[] = {
-      "echo", "exit", "type", "pwd", "cd", NULL};
-  static int list_index, len;
-
-  // Initialize on first call (state == 0)
-  if (!state)
+  char fullPath[MAX_PATH_LENGTH];
+  char *path = getenv("PATH");
+  if (path == NULL)
   {
-    list_index = 0;
-    len = strlen(text);
+    return NULL;
   }
-
-  // Find next matching builtin
-  while (builtins[list_index])
+  for (;;)
   {
-    const char *name = builtins[list_index];
-    list_index++;
-
-    if (strncmp(name, text, len) == 0)
+    char *separator = strchr(path, ':');
+    int pathLen = separator != NULL ? separator - path : strlen(path);
+    if (pathLen == 0)
     {
-      return strdup(name);
+      break;
     }
+    int fullPathLen = snprintf(fullPath, MAX_PATH_LENGTH, "%.*s/%s", pathLen, path, name);
+    if (access(fullPath, F_OK) == 0)
+    {
+      char *result = malloc(fullPathLen + 1);
+      if (result == NULL)
+      {
+        perror("malloc");
+        return NULL;
+      }
+      snprintf(result, fullPathLen + 1, "%s", fullPath);
+      return result;
+    }
+    if (separator == NULL)
+    {
+      break;
+    }
+    path = separator + 1;
   }
-
   return NULL;
 }
 
-/**
- * Readline completion generator for executables in PATH.
- * This function is called repeatedly to generate matches.
- */
-char *path_generator(const char *text, int state)
+void cmdType(char *arg, FILE *out, FILE *err)
 {
-  static char *path_copy = NULL;
-  static char *current_dir = NULL;
-  static DIR *dir_handle = NULL;
-  static int text_len;
-  // Initialize on first call (state == 0)
-  if (!state)
+  for (int i = 0; i < ARRAY_LENGTH(builtins); i++)
   {
-    text_len = strlen(text);
-    // Clean up any previous state
-    if (dir_handle)
+    if (strcmp(arg, builtins[i]) == 0)
     {
-      closedir(dir_handle);
-      dir_handle = NULL;
+      fprintf(out, "%s is a shell builtin\n", arg);
+      return;
     }
-    if (path_copy)
-    {
-      free(path_copy);
-      path_copy = NULL;
-    }
-
-    // Get PATH environment variable
-    char *path_env = getenv("PATH");
-    if (path_env == NULL)
-      return NULL;
-
-    path_copy = strdup(path_env);
-    if (path_copy == NULL)
-      return NULL;
-
-    current_dir = strtok(path_copy, ":");
   }
-
-  // Search through directories in PATH
-  while (current_dir != NULL)
+  char *fullPath = pathLookup(arg);
+  if (fullPath != NULL)
   {
-    // Open directory if not already open
-    if (dir_handle == NULL)
+    fprintf(out, "%s is %s\n", arg, fullPath);
+    free(fullPath);
+    return;
+  }
+  fprintf(err, "%s: not found\n", arg);
+}
+
+char **splitCommandLine(char *input)
+{
+  int count = 0;
+  int capacity = 0;
+  char **result = NULL;
+  char token[MAX_CMD_INPUT];
+  int length = 0;
+  char *cur = input;
+  for (;;)
+  {
+    bool panic = false;
+    switch (cur[0])
     {
-      dir_handle = opendir(current_dir);
-      if (dir_handle == NULL)
+    case '\'':
+    {
+      cur++; // opening '
+      while (cur[0] != '\'' && cur[0] != '\0')
       {
-        // Directory doesn't exist or can't be opened, move to next
-        current_dir = strtok(NULL, ":");
-        continue;
+        token[length++] = cur[0];
+        cur++;
       }
-    }
-
-    // Read entries from current directory
-    struct dirent *entry;
-    while ((entry = readdir(dir_handle)) != NULL)
-    {
-      // Skip .
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-      // Check if entry matches the text
-      if (strncmp(entry->d_name, text, text_len) == 0)
+      if (cur[0] == '\0')
       {
-        // Check if it's executable
-        char full_path[MAX_PATH_LENGTH];
-        snprintf(full_path, sizeof(full_path), "%s/%s", current_dir, entry->d_name);
-
-        if (access(full_path, X_OK) == 0)
+        fprintf(stderr, "unmatched '\n");
+        panic = true;
+        break;
+      }
+      cur++; // closing '
+      break;
+    }
+    case '"':
+    {
+      cur++; // opening "
+      while (cur[0] != '"' && cur[0] != '\0')
+      {
+        if (cur[0] == '\\' && (cur[1] == '\\' || cur[1] == '$' || cur[1] == '"'))
         {
-          return strdup(entry->d_name);
+          token[length++] = cur[1];
+          cur += 2;
+        }
+        else
+        {
+          token[length++] = cur[0];
+          cur++;
         }
       }
+      if (cur[0] == '\0')
+      {
+        panic = true;
+        fprintf(stderr, "unmatched \"\n");
+        break;
+      }
+      cur++; // closing "
+      break;
     }
-
-    // Close current directory and move to next
-    closedir(dir_handle);
-    dir_handle = NULL;
-    current_dir = strtok(NULL, ":");
+    case '\\':
+    {
+      token[length++] = cur[1];
+      cur += 2;
+      break;
+    }
+    default:
+      if (!isspace(cur[0]) && cur[0] != '\0')
+      {
+        token[length++] = cur[0];
+        cur++;
+      }
+    }
+    if (panic)
+    {
+      for (int i = 0; i < count; i++)
+      {
+        free(result[i]);
+      }
+      free(result);
+      return NULL;
+    }
+    // check if reached token boundary
+    if (isspace(cur[0]) || cur[0] == '\0')
+    {
+      while (isspace(cur[0]))
+      {
+        cur++;
+      }
+      if (capacity < count + 1)
+      {
+        capacity = capacity == 0 ? 8 : capacity * 2;
+        result = realloc(result, sizeof(char *) * capacity);
+        if (result == NULL)
+        {
+          perror("realloc");
+          exit(EXIT_FAILURE);
+        }
+      }
+      char *arg = malloc(length + 1);
+      if (arg == NULL)
+      {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+      }
+      snprintf(arg, length + 1, "%s", token);
+      result[count++] = arg;
+      length = 0;
+      if (cur[0] == '\0')
+      {
+        break;
+      }
+    }
   }
-
-  // Cleanup
-  if (dir_handle)
+  if (count == 0)
   {
-    closedir(dir_handle);
-    dir_handle = NULL;
+    return NULL;
   }
-  if (path_copy)
+  if (capacity < count + 1)
   {
-    free(path_copy);
-    path_copy = NULL;
+    capacity++;
+    result = realloc(result, sizeof(char *) * capacity);
+    if (result == NULL)
+    {
+      perror("realloc");
+      exit(EXIT_FAILURE);
+    }
   }
-
-  return NULL;
+  result[count++] = NULL;
+  return result;
 }
 
-/**
- * Combined generator that tries builtins first, then PATH executables.
- */
-char *command_generator(const char *text, int state)
+void freeArrayAndElements(char **array)
 {
-  static int checking_builtins;
-  char *result;
-  // On first call, start with builtins
-  if (!state)
+  for (int i = 0; array[i] != NULL; i++)
   {
-    checking_builtins = 1;
+    free(array[i]);
   }
-
-  // Try builtins first
-  if (checking_builtins)
-  {
-    result = builtin_generator(text, state);
-    if (result != NULL)
-      return result;
-    // Done with builtins, move to PATH executables
-    checking_builtins = 0;
-    state = 0;
-    // Reset state for path_generator
-  }
-
-  // Try PATH executables
-  return path_generator(text, state);
+  free(array);
 }
 
-/**
- * Readline completion function.
- * Attempts to complete builtin commands and PATH executables.
- */
-char **shell_completion(const char *text, int start, int end)
+void childRedir(FILE *stream, int fd)
 {
-  char **matches = NULL;
-  // Only complete if we're at the start of the line (completing command name)
-  if (start == 0)
+  if (stream == stdin || stream == stdout || stream == stderr)
   {
-    matches = rl_completion_matches(text, command_generator);
+    return;
   }
-
-  // Return matches or NULL - this prevents default filename completion
-  return matches;
+  int fdOfStream = fileno(stream);
+  dup2(fdOfStream, fd);
+  close(fdOfStream);
 }
 
-/**
- * Initialize readline with custom completion.
- */
-void init_readline(void)
+void safeClose(FILE *file)
 {
-  // Set custom completion function
-  rl_attempted_completion_function = shell_completion;
-  // Append a space after successful completion
-  rl_completion_append_character = ' ';
+  if (file == stdin || file == stdout || file == stderr)
+  {
+    return;
+  }
+  fclose(file);
 }
 
-/**
- * Find the position of the pipe operator in args.
- * Returns the index of "|", or -1 if not found.
- */
-int find_pipe(char **args)
+void callExecutable(char *cmd, char **args, bool shouldWait, FILE *in, FILE *out, FILE *err)
 {
+  int pid = fork();
+  if (pid == 0)
+  {
+    childRedir(in, 0);
+    childRedir(out, 1);
+    childRedir(err, 2);
+    execv(cmd, args);
+    perror("execv");
+    _exit(EXIT_FAILURE); // child should not return
+  }
+  else if (pid > 0)
+  {
+    if (shouldWait)
+    {
+      int status;
+      waitpid(pid, &status, WUNTRACED);
+    }
+  }
+  else
+  {
+    perror("fork");
+  }
+}
+
+int min(int a, int b)
+{
+  return a < b ? a : b;
+}
+
+bool handleRedirection(char **args, FILE **out, FILE **err)
+{
+  // TODO: implement < redirection
+  int firstRedirectIndex = INT_MAX;
   for (int i = 0; args[i] != NULL; i++)
   {
-    if (strcmp(args[i], "|") == 0)
-    {
-      return i;
-    }
-  }
-  return -1;
-}
-
-/**
- * Parse command line and extract redirect files if present.
- * Returns the index where redirection starts, or -1 if no redirection.
- * Updates redirect_stdout, redirect_stderr with filenames.
- * Updates append_stdout and append_stderr to indicate if >> is used instead of >.
- */
-int find_redirect(char **args, char **redirect_stdout, char **redirect_stderr, int *append_stdout, int *append_stderr)
-{
-  *redirect_stdout = NULL;
-  *redirect_stderr = NULL;
-  *append_stdout = 0;
-  *append_stderr = 0;
-  int first_redirect_idx = -1;
-  for (int i = 0; args[i] != NULL; i++)
-  {
-    // Check for >> or 1>> (stdout append)
-    if (strcmp(args[i], ">>") == 0 || strcmp(args[i], "1>>") == 0)
+    if (strcmp(args[i], "1>") == 0 || strcmp(args[i], ">") == 0)
     {
       if (args[i + 1] == NULL)
       {
-        fprintf(stderr, "Error: No file specified for redirection\n");
-        return -2; // Error case
+        fprintf(stderr, "syntax error after %s\n", args[i]);
+        return false;
       }
-      *redirect_stdout = args[i + 1];
-      *append_stdout = 1;
-      if (first_redirect_idx == -1)
-        first_redirect_idx = i;
+      *out = fopen(args[i + 1], "w");
+      if (*out == NULL)
+      {
+        perror("fopen");
+        return false;
+      }
+      firstRedirectIndex = min(i, firstRedirectIndex);
     }
-    // Check for > or 1> (stdout)
-    else if (strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0)
+    else if (strcmp(args[i], "1>>") == 0 || strcmp(args[i], ">>") == 0)
     {
       if (args[i + 1] == NULL)
       {
-        fprintf(stderr, "Error: No file specified for redirection\n");
-        return -2; // Error case
+        fprintf(stderr, "syntax error after %s\n", args[i]);
+        return false;
       }
-      *redirect_stdout = args[i + 1];
-      *append_stdout = 0;
-      if (first_redirect_idx == -1)
-        first_redirect_idx = i;
-    }
-    // Check for 2>> (stderr append)
-    else if (strcmp(args[i], "2>>") == 0)
-    {
-      if (args[i + 1] == NULL)
+      *out = fopen(args[i + 1], "a");
+      if (*out == NULL)
       {
-        fprintf(stderr, "Error: No file specified for redirection\n");
-        return -2; // Error case
+        perror("fopen");
+        return false;
       }
-      *redirect_stderr = args[i + 1];
-      *append_stderr = 1;
-      if (first_redirect_idx == -1)
-        first_redirect_idx = i;
+      firstRedirectIndex = min(i, firstRedirectIndex);
     }
-    // Check for 2> (stderr)
     else if (strcmp(args[i], "2>") == 0)
     {
       if (args[i + 1] == NULL)
       {
-        fprintf(stderr, "Error: No file specified for redirection\n");
-        return -2; // Error case
+        fprintf(stderr, "syntax error after %s\n", args[i]);
+        return false;
       }
-      *redirect_stderr = args[i + 1];
-      *append_stderr = 0;
-      if (first_redirect_idx == -1)
-        first_redirect_idx = i;
+      *err = fopen(args[i + 1], "w");
+      if (*err == NULL)
+      {
+        perror("fopen");
+        return false;
+      }
+      firstRedirectIndex = min(i, firstRedirectIndex);
     }
-  }
-
-  return first_redirect_idx;
-}
-
-/**
- * Check if a command is a built-in.
- */
-int is_builtin(const char *cmd)
-{
-  return (strcmp(cmd, "echo") == 0 || strcmp(cmd, "exit") == 0 ||
-          strcmp(cmd, "type") == 0 || strcmp(cmd, "pwd") == 0 ||
-          strcmp(cmd, "cd") == 0);
-}
-
-/**
- * Execute echo builtin with optional output redirection.
- */
-void execute_echo(char **args, int redirect_idx, char *redirect_stdout, char *redirect_stderr, int append_stdout, int append_stderr)
-{
-  FILE *output = stdout;
-  FILE *error = stderr;
-
-  // Handle stdout redirection
-  if (redirect_stdout != NULL)
-  {
-    const char *mode = append_stdout ? "a" : "w";
-    output = fopen(redirect_stdout, mode);
-    if (output == NULL)
+    else if (strcmp(args[i], "2>>") == 0)
     {
-      perror("fopen");
-      return;
+      if (args[i + 1] == NULL)
+      {
+        fprintf(stderr, "syntax error after %s\n", args[i]);
+        return false;
+      }
+      *err = fopen(args[i + 1], "a");
+      if (*err == NULL)
+      {
+        perror("fopen");
+        return false;
+      }
+      firstRedirectIndex = min(i, firstRedirectIndex);
     }
   }
-
-  // Handle stderr redirection (echo doesn't produce stderr, but for consistency)
-  if (redirect_stderr != NULL)
+  if (firstRedirectIndex != INT_MAX)
   {
-    const char *mode = append_stderr ? "a" : "w";
-    error = fopen(redirect_stderr, mode);
-    if (error == NULL)
+    // TODO: consider allocating a copy instead and freeing the original
+    // free rest of array and mark new with null;
+    for (int i = firstRedirectIndex; args[i] != NULL; i++)
     {
-      perror("fopen");
-      if (output != stdout)
-        fclose(output);
-      return;
+      free(args[i]);
     }
+    args[firstRedirectIndex] = NULL;
   }
-
-  // Print arguments (up to redirect operator if present)
-  int end_idx = (redirect_idx >= 0) ? redirect_idx : MAX_ARGS;
-  for (int i = 1; args[i] != NULL && i < end_idx; i++)
-  {
-    if (i > 1)
-      fprintf(output, " ");
-    fprintf(output, "%s", args[i]);
-  }
-  fprintf(output, "\n");
-
-  if (output != stdout)
-    fclose(output);
-  if (error != stderr)
-    fclose(error);
+  return true;
 }
 
-/**
- * Execute type builtin.
- */
-void execute_type(char **args)
+void handleCmd(char *cmd, char **args, bool shouldWait, FILE *in, FILE *out, FILE *err)
 {
-  if (args[1] == NULL)
+  if (!handleRedirection(args, &out, &err))
   {
-    fprintf(stderr, "type: missing argument\n");
     return;
   }
-
-  char *arg = args[1];
-
-  if (is_builtin(arg))
+  if (strcmp(cmd, "exit") == 0)
   {
-    printf("%s is a shell builtin\n", arg);
+    exitShell = true;
+  }
+  else if (strcmp(cmd, "echo") == 0)
+  {
+    for (int i = 1; args[i] != NULL; i++)
+    {
+      fprintf(out, "%s%s", i == 1 ? "" : " ", args[i]);
+    }
+    fprintf(out, "\n");
+  }
+  else if (strcmp(cmd, "type") == 0)
+  {
+    if (args[1] != NULL)
+    {
+      cmdType(args[1], out, err);
+    }
+  }
+  else if (strcmp(cmd, "pwd") == 0)
+  {
+    char currentDir[MAX_PATH_LENGTH];
+    getcwd(currentDir, MAX_PATH_LENGTH);
+    fprintf(out, "%s\n", currentDir);
+  }
+  else if (strcmp(cmd, "cd") == 0)
+  {
+    char *path = args[1];
+    if (path != NULL)
+    {
+      if (strcmp("~", path) == 0)
+      {
+        path = getenv("HOME");
+      }
+      if (chdir(path) != 0)
+      {
+        fprintf(err, "cd: %s: %s\n", path, strerror(errno));
+      }
+    }
+  }
+  else if (strcmp(cmd, "history") == 0)
+  {
+    int start = 0;
+    HIST_ENTRY **entries = history_list();
+    if (args[1] != NULL)
+    {
+      int n = atoi(args[1]);
+      for (int i = 0; entries[i] != NULL; i++)
+      {
+        start++;
+      }
+      start -= n;
+      if (start < 0)
+      {
+        start = 0;
+      }
+    }
+    for (int i = start; entries[i] != NULL; i++)
+    {
+      printf("%d %s\n", i + 1, entries[i]->line);
+    }
   }
   else
   {
-    char full_path[MAX_PATH_LENGTH];
-    if (find_executable(arg, full_path, MAX_PATH_LENGTH))
+    char *fullPath = pathLookup(cmd);
+    if (fullPath != NULL)
     {
-      printf("%s is %s\n", arg, full_path);
+      callExecutable(fullPath, args, shouldWait, in, out, err);
+      free(fullPath);
     }
     else
     {
-      printf("%s: not found\n", arg);
+      fprintf(err, "%s: command not found\n", cmd);
     }
+  }
+  safeClose(in);
+  safeClose(out);
+  safeClose(err);
+}
+
+char **completionEntries = NULL;
+int completionEntriesCount = 0;
+int completionEntriesCapacity = 0;
+
+char *nextCompletionEntryCallback(const char *text, int state)
+{
+  static int index, length;
+  if (state == 0)
+  {
+    index = 0;
+    length = strlen(text);
+  }
+  // TODO: since entries are sorted, could possible binary search to find first matching entry
+  while (index < completionEntriesCount)
+  {
+    int current = index++;
+    if (strncmp(completionEntries[current], text, length) == 0)
+    {
+      return strdup(completionEntries[current]);
+    }
+  }
+  return NULL;
+}
+
+void addCompletionEntry(char *name)
+{
+  if (completionEntriesCapacity < completionEntriesCount + 1)
+  {
+    completionEntriesCapacity = completionEntriesCapacity == 0 ? 8 : completionEntriesCapacity * 2;
+    completionEntries = realloc(completionEntries, sizeof(completionEntries[0]) * completionEntriesCapacity);
+    if (completionEntries == NULL)
+    {
+      exit(EXIT_FAILURE);
+    }
+  }
+  char *clone = strdup(name);
+  completionEntries[completionEntriesCount++] = clone;
+}
+
+void freeCompletionEntries()
+{
+  for (int i = 0; i < completionEntriesCount; i++)
+  {
+    free(completionEntries[i]);
+  }
+  free(completionEntries);
+  completionEntriesCount = 0;
+  completionEntriesCapacity = 0;
+  completionEntries = NULL;
+}
+
+int entryCompare(const void *pp1, const void *pp2)
+{
+  char const *s1 = *(const char **)pp1;
+  char const *s2 = *(const char **)pp2;
+  return strcmp(s1, s2);
+}
+
+void printCompletionEntries()
+{
+  for (int i = 0; i < completionEntriesCount; i++)
+  {
+    printf("%d: %s\n", i, completionEntries[i]);
   }
 }
 
-/**
- * Execute pwd builtin with optional output redirection.
- */
-void execute_pwd(char *redirect_stdout, char *redirect_stderr, int append_stdout, int append_stderr)
+void removeDuplicateEntries()
 {
-  char cwd_buffer[MAX_PATH_LENGTH];
-  FILE *output = stdout;
-  FILE *error = stderr;
-  if (redirect_stdout != NULL)
+  // BUG: test this more thoroughly
+  int writeIndex = 1;
+  for (int readIndex = 1; readIndex < completionEntriesCount; readIndex++)
   {
-    const char *mode = append_stdout ? "a" : "w";
-    output = fopen(redirect_stdout, mode);
-    if (output == NULL)
+    if (entryCompare(&completionEntries[readIndex], &completionEntries[writeIndex - 1]) != 0)
     {
-      perror("fopen");
-      return;
+      if (readIndex != writeIndex)
+      {
+        completionEntries[writeIndex] = completionEntries[readIndex];
+      }
+      writeIndex++;
+    }
+    else
+    {
+      free(completionEntries[readIndex]);
     }
   }
-
-  if (redirect_stderr != NULL)
+  for (int i = writeIndex; i < completionEntriesCount; i++)
   {
-    const char *mode = append_stderr ? "a" : "w";
-    error = fopen(redirect_stderr, mode);
-    if (error == NULL)
+    completionEntries[i] = NULL;
+  }
+  completionEntriesCount = writeIndex;
+}
+
+void sortCompletionEntries()
+{
+  qsort(completionEntries, completionEntriesCount, sizeof(completionEntries[0]), entryCompare);
+}
+
+void updateCompletionEntries()
+{
+  freeCompletionEntries();
+  char *path = getenv("PATH");
+  char pathStr[MAX_PATH_LENGTH];
+  if (path == NULL)
+  {
+    return;
+  }
+  for (;;)
+  {
+    char *separator = strchr(path, ':');
+    int pathLen = separator != NULL ? separator - path : strlen(path);
+    if (pathLen == 0)
     {
-      perror("fopen");
-      if (output != stdout)
-        fclose(output);
-      return;
+      break;
+    }
+    snprintf(pathStr, MAX_PATH_LENGTH, "%.*s", pathLen, path);
+    // printf("Searching path: %s\n", pathStr);
+    DIR *dir = opendir(pathStr);
+    if (dir != NULL)
+    {
+      struct dirent *entry = readdir(dir);
+      while (entry != NULL)
+      {
+        addCompletionEntry(entry->d_name);
+        entry = readdir(dir);
+      }
+      closedir(dir);
+    }
+    if (separator == NULL)
+    {
+      break;
+    }
+    path = separator + 1;
+  }
+  for (int i = 0; i < ARRAY_LENGTH(builtins); i++)
+  {
+    addCompletionEntry(builtins[i]);
+  }
+  // TODO: test these thoroughly and re-enable them
+  // sortCompletionEntries();
+  // removeDuplicateEntries();
+}
+
+typedef struct
+{
+  char **args;
+} CommandArgs;
+
+typedef struct
+{
+  int count;
+  CommandArgs *commands;
+} CommandGroup;
+
+CommandGroup splitPipes(char **args)
+{
+  CommandGroup group = {};
+  int prevPipeIndex = -1;
+  for (int i = 0;; i++)
+  {
+    if (args[i] == NULL || strcmp(args[i], "|") == 0)
+    {
+      group.count++;
+    }
+    if (args[i] == NULL)
+    {
+      break;
     }
   }
-
-  if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL)
+  group.commands = malloc(group.count * sizeof(CommandArgs));
+  if (group.commands == NULL)
   {
-    fprintf(output, "%s\n", cwd_buffer);
+    perror("malloc");
+    exit(EXIT_FAILURE);
   }
-  else
+  int cmdIndex = 0;
+  for (int i = 0;; i++)
   {
-    perror("getcwd");
+    if (args[i] == NULL || strcmp(args[i], "|") == 0)
+    {
+      if (args[i] != NULL && args[i + 1] == NULL)
+      {
+        fprintf(stderr, "syntax error after %s\n", args[i]);
+        // cleanup allocated commands and args
+        for (int i = 0; i < group.count; i++)
+        {
+          freeArrayAndElements(group.commands[i].args);
+        }
+        free(group.commands);
+        group.commands = NULL;
+        group.count = 0;
+        break;
+      }
+      CommandArgs *cmd = &group.commands[cmdIndex++];
+      int argCount = i - prevPipeIndex + 1; // NULL terminator
+      int argIndex = 0;
+      cmd->args = malloc(sizeof(char *) * argCount);
+      if (cmd->args == NULL)
+      {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+      }
+      // printf("cmd %d:", cmdIndex - 1);
+      for (int j = prevPipeIndex + 1; j < i; j++)
+      {
+        // printf(" %d:%s", argIndex, args[j]);
+        cmd->args[argIndex++] = strdup(args[j]);
+      }
+      // printf("\n");
+      cmd->args[argIndex++] = NULL;
+      prevPipeIndex = i;
+    }
+    if (args[i] == NULL)
+    {
+      break;
+    }
   }
-
-  if (output != stdout)
-    fclose(output);
-  if (error != stderr)
-    fclose(error);
+  freeArrayAndElements(args);
+  return group;
 }
 
 int main(int argc, char *argv[])
 {
   // Flush after every printf
   setbuf(stdout, NULL);
-  // Initialize readline
-  init_readline();
-
-  while (1)
+  updateCompletionEntries();
+  rl_completion_entry_function = nextCompletionEntryCallback;
+  using_history();
+  while (!exitShell)
   {
-    // 1. Read the user's input using readline
     char *input = readline("$ ");
-    // Check for EOF (Ctrl+D)
     if (input == NULL)
     {
-      printf("\n");
       break;
     }
-
-    // 2. Handle empty input
-    if (strlen(input) == 0)
+    char **args = splitCommandLine(input);
+    if (args == NULL || args[0] == NULL || strlen(args[0]) == 0)
     {
-      free(input);
       continue;
     }
-
-    // Add to history
     add_history(input);
-    // Copy input to command buffer for processing
-    char command[MAX_COMMAND_LENGTH];
-    strncpy(command, input, MAX_COMMAND_LENGTH - 1);
-    command[MAX_COMMAND_LENGTH - 1] = '\0';
-
-    // Free the readline buffer
-    free(input);
-    // --- Parse command with quote handling ---
-    char *args[MAX_ARGS];
-    int arg_index = 0;
-    char *read_ptr = command;
-    char *write_ptr = command;
-
-    int state = STATE_DEFAULT;
-    args[arg_index] = write_ptr;
-    int new_arg = 1;
-    while (*read_ptr != '\0')
+    CommandGroup group = splitPipes(args);
+    if (group.count == 1)
     {
-      char c = *read_ptr;
-      if (state == STATE_DEFAULT)
-      {
-        if (c == '\\')
-        {
-          read_ptr++;
-          if (*read_ptr == '\0')
-            break;
-          *write_ptr = *read_ptr;
-          write_ptr++;
-          read_ptr++;
-          new_arg = 0;
-        }
-        else if (c == ' ')
-        {
-          if (!new_arg)
-          {
-            *write_ptr = '\0';
-            write_ptr++;
-
-            arg_index++;
-            if (arg_index >= MAX_ARGS - 1)
-            {
-              fprintf(stderr, "Error: Too many arguments\n");
-              break;
-            }
-            args[arg_index] = write_ptr;
-            new_arg = 1;
-          }
-          read_ptr++;
-        }
-        else if (c == '\'')
-        {
-          state = STATE_IN_QUOTE;
-          read_ptr++;
-          new_arg = 0;
-        }
-        else if (c == '"')
-        {
-          state = STATE_IN_DQUOTE;
-          read_ptr++;
-          new_arg = 0;
-        }
-        else
-        {
-          *write_ptr = c;
-
-          write_ptr++;
-          read_ptr++;
-          new_arg = 0;
-        }
-      }
-      else if (state == STATE_IN_QUOTE)
-      {
-        if (c == '\'')
-        {
-          state = STATE_DEFAULT;
-          read_ptr++;
-        }
-        else
-        {
-          *write_ptr = c;
-          write_ptr++;
-          read_ptr++;
-        }
-      }
-      else if (state == STATE_IN_DQUOTE)
-      {
-        if (c == '\\')
-
-        {
-          if (read_ptr[1] == '\\' || read_ptr[1] == '"')
-          {
-            read_ptr++;
-            *write_ptr = *read_ptr;
-            write_ptr++;
-            read_ptr++;
-          }
-          else
-          {
-            *write_ptr = c;
-            write_ptr++;
-            read_ptr++;
-          }
-        }
-        else if (c == '"')
-        {
-          state = STATE_DEFAULT;
-          read_ptr++;
-        }
-        else
-        {
-          *write_ptr = c;
-          write_ptr++;
-
-          read_ptr++;
-        }
-      }
-    }
-
-    if (state == STATE_IN_QUOTE)
-    {
-      fprintf(stderr, "Error: Unclosed single quote\n");
-      continue;
-    }
-    if (state == STATE_IN_DQUOTE)
-    {
-      fprintf(stderr, "Error: Unclosed double quote\n");
-      continue;
-    }
-
-    *write_ptr = '\0';
-
-    if (!new_arg)
-
-    {
-      arg_index++;
-    }
-    args[arg_index] = NULL;
-
-    if (args[0] == NULL)
-    {
-      continue;
-    }
-
-    // --- Check for output redirection ---
-    char *redirect_stdout = NULL;
-    char *redirect_stderr = NULL;
-    int append_stdout = 0;
-    int append_stderr = 0;
-    int redirect_idx = find_redirect(args, &redirect_stdout, &redirect_stderr, &append_stdout, &append_stderr);
-
-    if (redirect_idx == -2)
-
-    {
-      continue; // Error in redirection syntax
-    }
-
-    // Null-terminate args at first redirect operator
-    if (redirect_idx >= 0)
-    {
-      args[redirect_idx] = NULL;
-    }
-
-    // --- Builtin Command Handling ---
-
-    // 5. Check for 'exit 0'
-    if (strcmp(args[0], "exit") == 0)
-    {
-      return 0;
-    }
-
-    // 6. Check for 'pwd'
-    if (strcmp(args[0], "pwd") == 0)
-    {
-      execute_pwd(redirect_stdout, redirect_stderr, append_stdout, append_stderr);
-      continue;
-    }
-
-    // 7. Check for 'echo'
-    if (strcmp(args[0], "echo") == 0)
-    {
-      execute_echo(args, redirect_idx, redirect_stdout, redirect_stderr, append_stdout, append_stderr);
-      continue;
-    }
-
-    // 8. Check for 'cd'
-    if (strcmp(args[0], "cd") == 0)
-    {
-      if (args[1] == NULL)
-      {
-        fprintf(stderr, "cd: missing argument\n");
-        continue;
-      }
-
-      char *path_to_change = NULL;
-      if (strcmp(args[1], "~") == 0)
-      {
-        path_to_change = getenv("HOME");
-        if (path_to_change == NULL)
-        {
-          fprintf(stderr, "cd: HOME not set\n");
-          continue;
-        }
-      }
-      else
-      {
-        path_to_change = args[1];
-      }
-
-      if (chdir(path_to_change) != 0)
-      {
-        fprintf(stderr, "cd: %s: %s\n", args[1], strerror(errno));
-      }
-      continue;
-    }
-
-    // 9. Check for 'type'
-    if (strcmp(args[0], "type") == 0)
-    {
-      execute_type(args);
-      continue;
-    }
-
-    // --- Check for Pipeline ---
-    int pipe_idx = find_pipe(args);
-    if (pipe_idx > 0)
-    {
-      // Split the command into two parts at the pipe
-      char *cmd1_args[MAX_ARGS];
-      char *cmd2_args[MAX_ARGS];
-
-      // Copy first command arguments
-      for (int i = 0; i < pipe_idx; i++)
-      {
-        cmd1_args[i] = args[i];
-      }
-      cmd1_args[pipe_idx] = NULL;
-
-      // Copy second command arguments
-      int j = 0;
-      for (int i = pipe_idx + 1; args[i] != NULL; i++)
-      {
-        cmd2_args[j++] = args[i];
-      }
-      cmd2_args[j] = NULL;
-
-      // Check if commands are builtins or external
-      int cmd1_is_builtin = is_builtin(cmd1_args[0]);
-      int cmd2_is_builtin = is_builtin(cmd2_args[0]);
-
-      // Find executables for external commands
-      char full_path1[MAX_PATH_LENGTH];
-      char full_path2[MAX_PATH_LENGTH];
-      if (!cmd1_is_builtin && !find_executable(cmd1_args[0], full_path1, MAX_PATH_LENGTH))
-      {
-        fprintf(stderr, "%s: command not found\n", cmd1_args[0]);
-        continue;
-      }
-
-      if (!cmd2_is_builtin && !find_executable(cmd2_args[0], full_path2, MAX_PATH_LENGTH))
-      {
-        fprintf(stderr, "%s: command not found\n", cmd2_args[0]);
-        continue;
-      }
-
-      // Create pipe
-      int pipefd[2];
-      if (pipe(pipefd) == -1)
-      {
-        perror("pipe");
-        continue;
-      }
-
-      // Fork first child for first command
-      pid_t pid1 = fork();
-      if (pid1 == -1)
-      {
-        perror("fork");
-        close(pipefd[0]);
-        close(pipefd[1]);
-        continue;
-      }
-      else if (pid1 == 0)
-      {
-        // First child: execute first command
-        // Close read end of pipe
-        close(pipefd[0]);
-        // Redirect stdout to pipe write end
-        if (dup2(pipefd[1], STDOUT_FILENO) == -1)
-        {
-          perror("dup2");
-          exit(EXIT_FAILURE);
-        }
-
-        close(pipefd[1]);
-        // Execute first command (builtin or external)
-        if (cmd1_is_builtin)
-        {
-          if (strcmp(cmd1_args[0], "echo") == 0)
-          {
-            execute_echo(cmd1_args, -1, NULL, NULL, 0, 0);
-          }
-          else if (strcmp(cmd1_args[0], "pwd") == 0)
-          {
-            execute_pwd(NULL, NULL, 0, 0);
-          }
-          else if (strcmp(cmd1_args[0], "type") == 0)
-          {
-            execute_type(cmd1_args);
-          }
-          else if (strcmp(cmd1_args[0], "cd") == 0)
-          {
-            if (cmd1_args[1] == NULL)
-            {
-              fprintf(stderr, "cd: missing argument\n");
-            }
-            else
-            {
-              char *path_to_change = NULL;
-              if (strcmp(cmd1_args[1], "~") == 0)
-              {
-                path_to_change = getenv("HOME");
-                if (path_to_change == NULL)
-                {
-                  fprintf(stderr, "cd: HOME not set\n");
-                }
-              }
-              else
-              {
-                path_to_change = cmd1_args[1];
-              }
-              if (path_to_change && chdir(path_to_change) != 0)
-              {
-                fprintf(stderr, "cd: %s: %s\n", cmd1_args[1], strerror(errno));
-              }
-            }
-          }
-          else if (strcmp(cmd1_args[0], "exit") == 0)
-          {
-            exit(EXIT_SUCCESS);
-          }
-          exit(EXIT_SUCCESS);
-        }
-        else
-        {
-          if (execv(full_path1, cmd1_args) == -1)
-          {
-            perror("execv");
-            exit(EXIT_FAILURE);
-          }
-        }
-      }
-
-      // Fork second child for second command
-      pid_t pid2 = fork();
-      if (pid2 == -1)
-      {
-        perror("fork");
-        close(pipefd[0]);
-        close(pipefd[1]);
-        waitpid(pid1, NULL, 0);
-        continue;
-      }
-      else if (pid2 == 0)
-      {
-        // Second child: execute second command
-        // Close write end of pipe
-        close(pipefd[1]);
-        // Redirect stdin to pipe read end
-        if (dup2(pipefd[0], STDIN_FILENO) == -1)
-        {
-          perror("dup2");
-          exit(EXIT_FAILURE);
-        }
-
-        close(pipefd[0]);
-        // Execute second command (builtin or external)
-        if (cmd2_is_builtin)
-        {
-          if (strcmp(cmd2_args[0], "echo") == 0)
-          {
-            execute_echo(cmd2_args, -1, NULL, NULL, 0, 0);
-          }
-          else if (strcmp(cmd2_args[0], "pwd") == 0)
-          {
-            execute_pwd(NULL, NULL, 0, 0);
-          }
-          else if (strcmp(cmd2_args[0], "type") == 0)
-          {
-            execute_type(cmd2_args);
-          }
-          else if (strcmp(cmd2_args[0], "cd") == 0)
-          {
-            if (cmd2_args[1] == NULL)
-            {
-              fprintf(stderr, "cd: missing argument\n");
-            }
-            else
-            {
-              char *path_to_change = NULL;
-              if (strcmp(cmd2_args[1], "~") == 0)
-              {
-                path_to_change = getenv("HOME");
-                if (path_to_change == NULL)
-                {
-                  fprintf(stderr, "cd: HOME not set\n");
-                }
-              }
-              else
-              {
-                path_to_change = cmd2_args[1];
-              }
-              if (path_to_change && chdir(path_to_change) != 0)
-              {
-                fprintf(stderr, "cd: %s: %s\n", cmd2_args[1], strerror(errno));
-              }
-            }
-          }
-          else if (strcmp(cmd2_args[0], "exit") == 0)
-          {
-            exit(EXIT_SUCCESS);
-          }
-          exit(EXIT_SUCCESS);
-        }
-        else
-        {
-          if (execv(full_path2, cmd2_args) == -1)
-          {
-            perror("execv");
-            exit(EXIT_FAILURE);
-          }
-        }
-      }
-
-      // Parent: close both ends of pipe and wait for both children
-      close(pipefd[0]);
-      close(pipefd[1]);
-
-      waitpid(pid1, NULL, 0);
-      waitpid(pid2, NULL, 0);
-
-      continue;
-    }
-
-    // --- External Command Execution (No Pipeline) ---
-    char *cmd_name = args[0];
-    char full_path[MAX_PATH_LENGTH];
-
-    if (find_executable(cmd_name, full_path, MAX_PATH_LENGTH))
-    {
-      pid_t pid = fork();
-      if (pid == -1)
-      {
-        perror("fork");
-      }
-      else if (pid == 0)
-      {
-        // Child Process
-
-        // Handle stdout redirection
-        if (redirect_stdout != NULL)
-        {
-          int flags = O_WRONLY |
-                      O_CREAT;
-          flags |= append_stdout ? O_APPEND : O_TRUNC;
-
-          int fd = open(redirect_stdout, flags, 0644);
-          if (fd == -1)
-          {
-            perror("open");
-            exit(EXIT_FAILURE);
-          }
-
-          if (dup2(fd, STDOUT_FILENO) == -1)
-          {
-            perror("dup2");
-            close(fd);
-            exit(EXIT_FAILURE);
-          }
-
-          close(fd);
-        }
-
-        // Handle stderr redirection
-        if (redirect_stderr != NULL)
-        {
-          int flags = O_WRONLY |
-                      O_CREAT;
-          flags |= append_stderr ? O_APPEND : O_TRUNC;
-
-          int fd = open(redirect_stderr, flags, 0644);
-          if (fd == -1)
-          {
-            perror("open");
-            exit(EXIT_FAILURE);
-          }
-
-          if (dup2(fd, STDERR_FILENO) == -1)
-          {
-            perror("dup2");
-            close(fd);
-            exit(EXIT_FAILURE);
-          }
-
-          close(fd);
-        }
-
-        if (execv(full_path, args) == -1)
-        {
-          perror("execv");
-          exit(EXIT_FAILURE);
-        }
-      }
-      else
-      {
-        // Parent Process
-        int status;
-        waitpid(pid, &status, 0);
-      }
+      char **args = group.commands[0].args;
+      handleCmd(args[0], args, true, stdin, stdout, stderr);
+      freeArrayAndElements(args);
     }
     else
     {
-      fprintf(stderr, "%s: command not found\n", cmd_name);
+      FILE *input, *output, *prevInput;
+      prevInput = stdin;
+      for (int i = 0; i < group.count; i++)
+      {
+        bool shouldWait = false;
+        if (i < group.count - 1)
+        {
+          int pipeDescriptors[2];
+          if (pipe(pipeDescriptors) != 0)
+          {
+            perror("pipe");
+            return EXIT_FAILURE;
+          }
+          input = fdopen(pipeDescriptors[0], "r");
+          output = fdopen(pipeDescriptors[1], "w");
+        }
+        else
+        {
+          output = stdout;
+          shouldWait = true;
+        }
+        char **args = group.commands[i].args;
+        handleCmd(args[0], args, shouldWait, prevInput, output, stderr);
+        freeArrayAndElements(args);
+        prevInput = input;
+      }
     }
+    free(group.commands);
+    free(input);
   }
-
+  clear_history();
+  freeCompletionEntries();
   return 0;
 }
